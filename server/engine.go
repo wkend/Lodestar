@@ -916,7 +916,7 @@ func (e *Engine) workerLoop(ctx context.Context, t *Task, name string) {
 // runWorkerStep claims one intent from the frontier and fully settles it via
 // runIntent. Returns false when nothing was claimable. The pool worker loop is its
 // only caller.
-func (e *Engine) runWorkerStep(ctx context.Context, t *Task, name string, worker *agent.Worker) bool {
+func (e *Engine) runWorkerStep(ctx context.Context, t *Task, name string, worker agent.AgentBackend) bool {
 	intent := e.claimNext(t, name)
 	if intent == nil {
 		return false
@@ -933,7 +933,7 @@ func (e *Engine) runWorkerStep(ctx context.Context, t *Task, name string, worker
 // transcript marker that dedups re-injection across model_error retries. The caller
 // must already hold one task-operation admission for the whole sequence so a delete
 // cannot observe quiescence between the LLM return and the final DB writes.
-func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *agent.Worker, intent *db.Node, requestID, message string) bool {
+func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker agent.AgentBackend, intent *db.Node, requestID, message string) bool {
 	hasChatMessage := message != ""
 	e.stampFirstRun(t) // 首次真正执行 → 盖 first_run_at + 算 deadline(仅带 timeout 的任务)
 	e.touch(t.ID)
