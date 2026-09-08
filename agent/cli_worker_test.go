@@ -2,7 +2,9 @@ package agent
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // parseCLIResult is the only non-trivial logic in CLIWorker: pull the trailing
@@ -68,5 +70,51 @@ func mustUnmarshal(t *testing.T, b []byte, v any) {
 	t.Helper()
 	if err := json.Unmarshal(b, v); err != nil {
 		t.Fatalf("unmarshal %s: %v", b, err)
+	}
+}
+
+// lastBalancedObject must ignore braces inside string literals (and escaped
+// quotes), else a "}" in evidence text truncates the object early — which is
+// exactly how a bare-object CLI reply loses data.
+func TestLastBalancedObject(t *testing.T) {
+	cases := []struct{ in, want string }{
+		// brace inside a string value must not close the object
+		{`noise {"evidence":"got 500 } here"} tail`, `{"evidence":"got 500 } here"}`},
+		// escaped quote inside string must not end the string early
+		{`{"detail":"he said \"hi }\" ok"}`, `{"detail":"he said \"hi }\" ok"}`},
+		// nested object: outer one is returned whole
+		{`x {"a":{"b":1}} y`, `{"a":{"b":1}}`},
+		// last complete top-level object wins
+		{`{"n":1} then {"n":2}`, `{"n":2}`},
+		// no object at all
+		{`plain text`, ``},
+	}
+	for _, c := range cases {
+		if got := lastBalancedObject(c.in); got != c.want {
+			t.Errorf("lastBalancedObject(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// lastLine returns the last non-empty line, capped at a rune boundary. The cap
+// must not slice a multi-byte char (stderr is often Chinese) into invalid UTF-8.
+func TestLastLine(t *testing.T) {
+	if got := lastLine(""); got != "" {
+		t.Errorf("empty: got %q", got)
+	}
+	if got := lastLine("only line"); got != "only line" {
+		t.Errorf("single: got %q", got)
+	}
+	if got := lastLine("first\n  second  \n"); got != "second" {
+		t.Errorf("multiline+trim: got %q", got)
+	}
+	// a long line of 3-byte Chinese runes (600 bytes) must cap without producing
+	// invalid UTF-8.
+	got := lastLine(strings.Repeat("错", 200)) // 200*3 = 600 bytes
+	if len(got) > 500 {
+		t.Errorf("cap: len=%d > 500", len(got))
+	}
+	if !utf8.ValidString(got) {
+		t.Errorf("cap produced invalid UTF-8: %q", got)
 	}
 }

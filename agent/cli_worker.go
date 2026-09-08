@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -9,10 +10,11 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Autumn-27/artex/db"
-	actool "github.com/Autumn-27/norma/tool"
 	"github.com/Autumn-27/norma/harness"
+	actool "github.com/Autumn-27/norma/tool"
 )
 
 // CLIWorker delegates one intent to a general-purpose agent CLI subprocess
@@ -128,7 +130,7 @@ func (w *CLIWorker) run(ctx context.Context, name string, taskID int64, as *db.A
 		}
 	}
 
-	w.writeBack(ctx, tsx, intent, result)
+	w.writeBack(ctx, tsx, intent, result, emit)
 	return harness.ReasonCompleted, tsx.Writes(), nil
 }
 
@@ -158,8 +160,33 @@ func (w *CLIWorker) exec(ctx context.Context, prompt string) (string, error) {
 	if viaStdin {
 		cmd.Stdin = strings.NewReader(prompt)
 	}
-	out, err := cmd.Output() // stderr discarded; stdout carries the result
+	// capture stderr so a failing CLI (bad key / proxy / model 5xx) surfaces its
+	// reason instead of a bare "exit status 1".
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output() // stdout carries the result
+	if err != nil {
+		if s := strings.TrimSpace(stderr.String()); s != "" {
+			err = fmt.Errorf("%w: %s", err, lastLine(s))
+		}
+	}
 	return string(out), err
+}
+
+// lastLine returns the last non-empty line of s, capped, for compact error
+// context (CLIs usually put the real failure on the final stderr line).
+func lastLine(s string) string {
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	last := strings.TrimSpace(lines[len(lines)-1])
+	if len(last) > 500 {
+		last = last[:500]
+		// drop trailing bytes until valid UTF-8, so a multi-byte char (stderr is
+		// often Chinese) isn't left sliced mid-sequence.
+		for len(last) > 0 && !utf8.ValidString(last) {
+			last = last[:len(last)-1]
+		}
+	}
+	return last
 }
 
 // ---- ① inject: build the prompt with a directed graph slice ------------------
@@ -207,14 +234,26 @@ type cliResult struct {
 	NewAssets json.RawMessage   `json:"new_assets"` // passed as-is to insert_assets
 }
 
-func (w *CLIWorker) writeBack(ctx context.Context, tsx *ToolSet, intent *db.Node, r *cliResult) {
+func (w *CLIWorker) writeBack(ctx context.Context, tsx *ToolSet, intent *db.Node, r *cliResult, emit func(db.Activity)) {
 	byName := map[string]actool.CoreTool{}
 	for _, t := range tsx.WorkerTools() {
 		byName[t.Name()] = t
 	}
+	// call feeds one JSON payload to a write tool. A write can fail silently in
+	// ways that lose data (e.g. an asset_id referencing a non-existent asset
+	// rolls back the whole AddNode via FK) — surface those as a note so the run
+	// isn't reported clean while data was dropped.
 	call := func(name string, in json.RawMessage) {
-		if t := byName[name]; t != nil && len(in) > 0 {
-			_, _ = t.Call(ctx, in, nil)
+		t := byName[name]
+		if t == nil || len(in) == 0 {
+			return
+		}
+		res, err := t.Call(ctx, in, nil)
+		if err == nil && res.IsError {
+			err = fmt.Errorf("%s", res.Flatten())
+		}
+		if err != nil && emit != nil {
+			emit(db.Activity{Kind: "note", Summary: "CLIWorker 写回失败(" + name + "): " + lastLine(err.Error())})
 		}
 	}
 	for _, f := range r.Facts {
@@ -315,9 +354,13 @@ const jsonOnlyReprompt = "现在【只】输出上面结论的 JSON（按给定�
 const cliOutputContract = "【输出格式（必须遵守）】：在你所有工作完成后，输出且仅输出一个 ```json 代码块，形如：\n" +
 	"```json\n" +
 	"{\n" +
-	"  \"facts\": [{\"summary\":\"一句话结论\",\"detail\":\"细节\",\"evidence\":\"一行关键证据\",\"confidence\":\"high|medium|low\",\"asset_ids\":[]}],\n" +
+	"  \"facts\": [{\"summary\":\"一句话结论\",\"detail\":\"细节\",\"evidence\":\"一行关键证据\",\"confidence\":\"observed|inferred\",\"asset_ids\":[]}],\n" +
 	"  \"findings\": [{\"vulnclass\":\"SQL Injection\",\"name\":\"标题\",\"severity\":\"critical|high|medium|low\",\"summary\":\"摘要\",\"evidence\":\"PoC 文本\",\"asset_ids\":[]}],\n" +
-	"  \"new_assets\": {}\n" +
+	"  \"new_assets\": {\"assets\": []}\n" +
 	"}\n" +
 	"```\n" +
-	"三个字段都可为空数组。asset_ids 只能引用上面态势里出现过的资产 id。没有漏洞时 findings 留空。"
+	"字段说明：\n" +
+	"• confidence：observed（工具输出里直接看到）| inferred（据现象推断）。\n" +
+	"• asset_ids：可选，只填【上面态势里确实出现过的】资产 id；不确定就留空数组，不要编造 id。\n" +
+	"• new_assets.assets：本次新发现的资产数组（每个元素含 type 及对应字段），没有就留空数组。\n" +
+	"三个顶层字段都可为空。没有漏洞时 findings 留空。"
