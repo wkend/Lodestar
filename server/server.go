@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -240,6 +241,13 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	} else {
 		log.Printf("[engine] no LLM provider configured — engine idle until set via /api/llm or env")
 	}
+	// LODESTAR_CLI_ENABLED: route worker intents to a general-purpose agent CLI
+	// subprocess (claude/codex) as the primary backend, with automatic fallback to
+	// the in-process norma worker on failure. Off by default → behavior unchanged.
+	if cw := s.buildCLIWorkerFromEnv(); cw != nil {
+		s.engine.SetCLIWorker(cw)
+		log.Printf("[engine] CLI 后端已启用: %s (失败回退 norma)", os.Getenv("LODESTAR_CLI_COMMAND"))
+	}
 	// reload tasks persisted on disk so the task list survives a restart, and
 	// restore persisted paused state (so a task paused before restart stays paused).
 	for _, t := range m.LoadExisting() {
@@ -298,6 +306,50 @@ func (s *Server) agentRunSeconds(key string) int {
 		return 1200
 	}
 	return a.RunSecs
+}
+
+// buildCLIWorkerFromEnv constructs the CLI-delegating backend from env, or nil
+// when LODESTAR_CLI_ENABLED is falsy / no command set. Config mirrors the norma
+// worker: same proxy (recording MITM), same run-timeout budget, project dir as
+// cwd. LODESTAR_CLI_ARGS is comma-split; use the literal {{PROMPT}} token in it
+// to pass the prompt as an arg (else it's piped via stdin). Extra child env comes
+// from LODESTAR_CLI_ENV (comma-separated KEY=VAL, e.g. API keys / model pins).
+func (s *Server) buildCLIWorkerFromEnv() agent.AgentBackend {
+	if isFalsy(os.Getenv("LODESTAR_CLI_ENABLED")) {
+		return nil
+	}
+	command := strings.TrimSpace(os.Getenv("LODESTAR_CLI_COMMAND"))
+	if command == "" {
+		log.Printf("[engine] LODESTAR_CLI_ENABLED 但未设 LODESTAR_CLI_COMMAND — 忽略")
+		return nil
+	}
+	cw := agent.NewCLIWorker(command, splitEnvList(os.Getenv("LODESTAR_CLI_ARGS")), s.m.dir)
+	cw.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
+	cw.SetRunTimeout(time.Duration(s.agentRunSeconds("worker")) * time.Second)
+	if env := splitEnvList(os.Getenv("LODESTAR_CLI_ENV")); len(env) > 0 {
+		cw.SetEnv(env)
+	}
+	return cw
+}
+
+// splitEnvList comma-splits a value into trimmed, non-empty items. Empty in → nil.
+func splitEnvList(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// isFalsy reports whether an env value means "off" ("", "0", "false", "no").
+func isFalsy(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "0", "false", "no", "off":
+		return true
+	}
+	return false
 }
 
 // loadLLMConfig reads the active LLM profile from PG (llm_profiles).

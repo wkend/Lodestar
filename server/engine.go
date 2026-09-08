@@ -83,6 +83,20 @@ func retryableWorkerModelError(reason harness.TerminalReason, err error) bool {
 	return reason == harness.ReasonModelError && !isTaskLLMRuntimeError(err)
 }
 
+// capErr renders an error capped at 500 runes for logging, so a CLI subprocess's
+// large stderr (surfaced through the error wrap) can't flood the log. Runes, not
+// bytes, so a multi-byte char (stderr is often Chinese) isn't sliced mid-sequence.
+func capErr(err error) string {
+	if err == nil {
+		return ""
+	}
+	r := []rune(err.Error())
+	if len(r) > 500 {
+		r = r[:500]
+	}
+	return string(r)
+}
+
 // Engine drives the event-driven exploration loop with real LLM agents
 // (docs §4.3/§4.4): on asset/exploration-graph change (debounced) it wakes the
 // planner, which reads the route, queries assets, judges goals and emits intents;
@@ -151,6 +165,13 @@ type Engine struct {
 	// to mean this task is deliberately unavailable (for example an exhausted chain).
 	resolve              func(t *Task) (*agent.Planner, *agent.Worker)
 	resolveAuthoritative bool
+
+	// cliWorker, if set (LODESTAR_CLI_ENABLED), is the primary backend for worker
+	// intents: it delegates each intent to a general-purpose agent CLI subprocess
+	// and, on failure, runIntent falls back to the per-task norma *Worker. Set once
+	// at startup before any task loop runs, read-only after — same no-lock rule as
+	// resolve.
+	cliWorker agent.AgentBackend
 }
 
 type taskRuntime struct {
@@ -646,6 +667,21 @@ func (e *Engine) snapshot() (*agent.Planner, *agent.Worker) {
 	return e.planner, e.worker
 }
 
+// SetCLIWorker installs the CLI-delegating primary backend (LODESTAR_CLI_ENABLED).
+// nil (the default) means every intent runs on the norma *Worker as before.
+func (e *Engine) SetCLIWorker(w agent.AgentBackend) { e.cliWorker = w }
+
+// pickBackend chooses the primary backend for one intent: the CLI worker when
+// configured, else the per-task norma worker. Global-switch only for now — no
+// per-intent routing until there is a reliable signal for it (see design). The
+// norma worker is always passed as fallback so a CLI failure never dead-ends.
+func (e *Engine) pickBackend(norma agent.AgentBackend) agent.AgentBackend {
+	if e.cliWorker != nil {
+		return e.cliWorker
+	}
+	return norma
+}
+
 // SetAgentResolver installs a per-task planner/worker resolver (wired by the server).
 // Called once at startup before any task loop runs, so no lock is needed on reads.
 func (e *Engine) SetAgentResolver(fn func(t *Task) (*agent.Planner, *agent.Worker)) {
@@ -959,14 +995,17 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker age
 	workCtx = intercept.WithTaskContext(workCtx, t.ID, fmt.Sprintf("%s · #%d", name, iid), taskEmit)
 	hooks := steerHooks{inner: t.Guard.Hooks(), drain: func() (string, bool) { return e.drainSteer(iid) }}
 	wTaskID, _ := strconv.ParseInt(t.ID, 10, 64)
+	// primary backend for this intent (CLI when enabled, else the norma worker).
+	// `worker` (always the norma *Worker) doubles as the fallback below.
+	primary := e.pickBackend(worker)
 	e.BeginLLMCall(t.ID)
 	var reason harness.TerminalReason
 	var wrote agent.WriteCounts
 	var err error
 	if hasChatMessage {
-		reason, wrote, err = worker.ExecuteWithMessage(workCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich, t.NotifyFinding, requestID, message)
+		reason, wrote, err = primary.ExecuteWithMessage(workCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich, t.NotifyFinding, requestID, message)
 	} else {
-		reason, wrote, err = worker.Execute(workCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich, t.NotifyFinding)
+		reason, wrote, err = primary.Execute(workCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich, t.NotifyFinding)
 	}
 	e.EndLLMCall(t.ID)
 	// model_error 收场 → 额外重跑几次（退避后再试）。仅在意图仍属本 work、任务
@@ -982,13 +1021,30 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker age
 		}
 		e.BeginLLMCall(t.ID)
 		if hasChatMessage {
+			reason, wrote, err = primary.ExecuteWithMessage(workCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich, t.NotifyFinding, requestID, message)
+		} else {
+			reason, wrote, err = primary.Execute(workCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich, t.NotifyFinding)
+		}
+		e.EndLLMCall(t.ID)
+	}
+	// CLI-backend fallback: if the CLI subprocess errored (bad key/proxy/model 5xx
+	// or a persistent model_error) and the run wasn't cancelled/paused/killed/
+	// settling, re-run the SAME intent once on the in-process norma worker. This is
+	// the safety net for the deliberate CLI ceilings (no live trace share, subprocess
+	// Bash not guard-gated): a failed delegation degrades to full ARTEX capability
+	// instead of dead-ending the intent. Skipped when the CLI already produced a
+	// clean run (err==nil) or when norma was the primary (no fallback to itself).
+	if primary != worker && retryableWorkerModelError(reason, err) &&
+		workCtx.Err() == nil && ectx.Err() == nil && !e.IsPaused(t.ID) && !e.isSettling(t.ID) {
+		log.Printf("[worker %s] task %s 意图 #%d CLI 后端失败(%s)，回退 norma 重跑", name, t.ID, intent.ID, capErr(err))
+		e.BeginLLMCall(t.ID)
+		if hasChatMessage {
 			reason, wrote, err = worker.ExecuteWithMessage(workCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich, t.NotifyFinding, requestID, message)
 		} else {
 			reason, wrote, err = worker.Execute(workCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich, t.NotifyFinding)
 		}
 		e.EndLLMCall(t.ID)
 	}
-	// Capture kill state before detachWork cancels workCtx. kill = this work's
 	// ctx was cancelled (planner kill_work) while the TASK ctx kept running; a
 	// pause cancels the task ctx (ectx) instead. Checking workCtx.Err() AFTER
 	// unregister would always be true (unregister cancels it) → every completed
