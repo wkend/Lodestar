@@ -392,7 +392,7 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	factFrom := map[int64]int64{}
 	for _, e := range edges {
 		switch e.Rel {
-		case db.RelDerivedFrom, db.RelSpawns: // upstream: derived_from (fact/finding/intent→intent) or spawns (origin fact→goal, legacy begin→intent)
+		case db.RelDerivedFrom, db.RelSpawns: // upstream: derived_from (fact/finding/hypothesis/intent→intent, fact→hypothesis) or spawns (origin fact→goal, legacy begin→intent)
 			parentsOf[e.To] = append(parentsOf[e.To], e.From)
 		case db.RelYields: // intent --yields--> fact/finding
 			yieldsOf[e.From] = append(yieldsOf[e.From], e.To)
@@ -444,6 +444,22 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 		recentFacts = append(recentFacts, m)
 	}
 	out["recent_facts"] = recentFacts // 最近事实的 {id, summary, from_intent, confidence?}，详情/证据用 node_detail(id)
+	// hypotheses: 第二 brain（态势研判者）产的态势级猜想。只折叠 open 的——已 confirmed/
+	// refuted 的对 planner 下一步无用（confirmed 已可当证据、refuted 是死路）。planner
+	// 据此派验证意图（intent --derived_from--> hypothesis）。parents=它综合的 fact。
+	hypNodes, _ := t.ts.ListByKind(db.KindHypothesis, 200)
+	openHyps := make([]map[string]any, 0, 20)
+	for _, n := range hypNodes {
+		if n.State != "open" || len(openHyps) >= 20 {
+			continue
+		}
+		m := compactNode(n)
+		if ps := parentsOf[n.ID]; len(ps) > 0 {
+			m["parents"] = ps // 本假设综合自哪些事实
+		}
+		openHyps = append(openHyps, m)
+	}
+	out["hypotheses"] = openHyps
 	// the original task (root) so the planner always has it, not just the
 	// decomposed goals.
 	if description, goal, err := t.ts.Root(); err == nil {
@@ -1051,8 +1067,9 @@ func (t *ToolSet) findDuplicateIntent(fp string) int64 {
 
 // addOneIntent 创建一条意图节点并连上游血缘，返回 id。
 // 约束：意图只能锚在已确认知识上——每个 parent_id 必须是已存在的 fact/finding
-// 节点（不能挂在别的意图/目标/提示上）。顶层全新方向留空 parent_ids，兜底连 origin fact。
-// 这样"每个意图都连到 fact 节点、且是发现驱动而非凭空规划"从创建路径上被强制。
+// 或第二 brain 产的 hypothesis 节点（不能挂在别的意图/目标/提示上）。顶层全新方向
+// 留空 parent_ids，兜底连 origin fact。这样"每个意图都连到 fact/hypothesis 节点、
+// 且是发现驱动而非凭空规划"从创建路径上被强制。
 // dup=true 表示命中了活跃意图去重：未新建节点，id 是已存在意图的 id。
 func (t *ToolSet) addOneIntent(it intentItem) (id int64, dup bool, err error) {
 	if strings.TrimSpace(it.Summary) == "" {
@@ -1065,8 +1082,11 @@ func (t *ToolSet) addOneIntent(it intentItem) (id int64, dup bool, err error) {
 		if err != nil || n == nil {
 			return 0, false, fmt.Errorf("parent_id %d 不存在于本任务或直接关联任务：parent_ids 必须是已存在的【事实(fact)/发现(finding)】节点 id；顶层全新方向请留空 parent_ids", pidv)
 		}
-		if n.Kind != db.KindFact && n.Kind != db.KindFinding {
-			return 0, false, fmt.Errorf("parent_id %d 是 %q 节点，不能作为意图锚点：意图只能锚在已确认的【事实(fact)/发现(finding)】上，不能挂在意图/目标/提示上；顶层全新方向请留空 parent_ids", pidv, n.Kind)
+		// hypothesis 是第二 brain 产出的态势级猜想：planner 据某条 open 假设派验证意图时，
+		// 该意图就 derived_from 这条 hypothesis（intent→derived_from→hypothesis）。故除
+		// fact/finding 外，hypothesis 也是合法锚点。
+		if n.Kind != db.KindFact && n.Kind != db.KindFinding && n.Kind != db.KindHypothesis {
+			return 0, false, fmt.Errorf("parent_id %d 是 %q 节点，不能作为意图锚点：意图只能锚在已确认的【事实(fact)/发现(finding)】或【假设(hypothesis)】上，不能挂在意图/目标/提示上；顶层全新方向请留空 parent_ids", pidv, n.Kind)
 		}
 	}
 	priority := it.Priority
@@ -1111,7 +1131,7 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 			"intents":    map[string]any{"type": "array", "description": "【优先用这个】要新增的探索方向数组，按顺序处理。每个元素字段同下方顶层字段（summary/asset_ids/parent_ids/priority）。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
 			"summary":    str("[单条] 一句话描述这个探索方向：做什么+为什么。已写清方向即可，不依赖资产 id。"),
 			"asset_ids":  map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "本方向要测试/攻击的【目标资产 id】（**尽量传**，0/1/多个；是 list_assets 返回的资产 id，不是探索节点 id）：这条探索方向针对哪些资产（站点/接口/参数/主机等）。只要方向围绕某些具体资产就务必传上——它是「这条探索打哪些目标」的结构化标记，用于覆盖去重、把意图连入资产链路。仅当纯全局侦察、确实没有具体目标资产时才留空。"},
-			"parent_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "上游锚点 id（可选，0/1/多个）：本方向由哪些【已确认的事实(fact)/发现(finding)】综合得出。**只能填已存在的 fact/finding 节点 id,不能填意图/目标/提示**——意图必须锚在已确认知识上,发现驱动而非凭空规划。多个事实共同产生一个新意图就传多个;顶层全新侦察方向请留空（会自动挂到任务起点 origin fact）。"},
+			"parent_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "上游锚点 id（可选，0/1/多个）：本方向由哪些【已确认的事实(fact)/发现(finding)】或【待验证假设(hypothesis)】综合得出。**只能填已存在的 fact/finding/hypothesis 节点 id,不能填意图/目标/提示**——意图必须锚在已确认知识或第二 brain 的假设上,发现驱动而非凭空规划。派意图去验证某条假设时,把该假设 id 放这里(intent--derived_from-->hypothesis)。多个事实共同产生一个新意图就传多个;顶层全新侦察方向请留空（会自动挂到任务起点 origin fact）。"},
 			"priority":   intp("优先级 0-10，默认5"),
 		}),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
@@ -1412,6 +1432,112 @@ func (t *ToolSet) recordFact() actool.CoreTool {
 				out["errors"] = errs
 			}
 			return jsonResult(out)
+		})
+}
+
+// recordHypothesis (Stage 6b) writes a situation-level CONJECTURE into the
+// exploration graph — the second brain's output. Unlike a fact (a confirmed
+// exploration result), a hypothesis is unverified: it awaits a planner-dispatched
+// intent to confirm or refute it. state starts "open"; the facts it was
+// synthesized from link fact --derived_from--> hypothesis, so the hypothesis's
+// parents in graphOverview's parentsOf are those facts.
+func (t *ToolSet) recordHypothesis() actool.CoreTool {
+	return writeTool("record_hypothesis", "把一条【态势级猜想/假设】写入探索图（第二 brain 专用）。假设是尚未验证的推断，等 planner 派意图去证实或推翻，不是已确认的事实。\n"+
+		"summary=一句话假设（如「X 接口与 Y 服务共享会话，越权可横向到 Y」）；detail=推理链与背景；rationale=你据哪些【已有事实】推出它（引用事实的关键内容）。\n"+
+		"parent_ids=你综合的那些【事实(fact)/发现(finding)】节点 id（尽量传，用于血缘：fact --derived_from--> hypothesis）。只写你据现有态势【真实推得】的假设，别脑补。",
+		obj(map[string]any{
+			"summary":    str("一句话假设结论"),
+			"detail":     str("推理链与背景细节"),
+			"rationale":  str("据哪些已有事实推出（引用关键内容）"),
+			"parent_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "综合出本假设的事实/发现节点 id（0/1/多个）"},
+		}, "summary"),
+		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
+			var a struct {
+				Summary   string            `json:"summary"`
+				Detail    string            `json:"detail"`
+				Rationale string            `json:"rationale"`
+				ParentIDs []json.RawMessage `json:"parent_ids"`
+			}
+			_ = json.Unmarshal(in, &a)
+			if strings.TrimSpace(a.Summary) == "" {
+				return actool.Errorf("summary 不能为空"), nil
+			}
+			// 建节点前先校验父锚：只接受 fact/finding（假设综合自已确认知识）。
+			parents := pidList(a.ParentIDs)
+			for _, pidv := range parents {
+				n, err := t.ts.GetNodeWithSources(pidv)
+				if err != nil || n == nil {
+					return actool.Errorf(fmt.Sprintf("parent_id %d 不存在：须为已存在的事实/发现节点 id", pidv)), nil
+				}
+				if n.Kind != db.KindFact && n.Kind != db.KindFinding {
+					return actool.Errorf(fmt.Sprintf("parent_id %d 是 %q 节点，不能作为假设锚点：假设只能综合自事实(fact)/发现(finding)", pidv, n.Kind)), nil
+				}
+			}
+			payload := map[string]any{"summary": a.Summary}
+			if a.Detail != "" {
+				payload["detail"] = a.Detail
+			}
+			if r := strings.TrimSpace(a.Rationale); r != "" {
+				payload["rationale"] = r
+			}
+			id, err := t.ts.AddNode(db.KindHypothesis, payload, 5, "open", t.worker, nil)
+			if err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			// 血缘：fact --derived_from--> hypothesis（该假设的 parents 即这些事实）。
+			for _, parent := range parents {
+				_ = t.ts.Link(parent, db.RelDerivedFrom, id)
+			}
+			return actool.Text(fmt.Sprintf("hypothesis recorded: %d", id)), nil
+		})
+}
+
+// resolveHypothesis (Stage 6b) flips an open hypothesis to confirmed/refuted after
+// a verification intent produced evidence. Mirrors prove_goal: strong type checks
+// (target must be a hypothesis, state ∈ confirmed/refuted) so a bad call gets a
+// readable error instead of a raw DB CHECK failure. On confirm, evidence_id (a
+// fact/finding) is linked via proves so "which fact confirmed it" stays queryable.
+func (t *ToolSet) resolveHypothesis() actool.CoreTool {
+	return writeTool("resolve_hypothesis", "把一条【假设(hypothesis)】标记为 confirmed（被证实）或 refuted（被推翻）——在验证它的意图产出事实后调用。\n"+
+		"state=confirmed|refuted；confirmed 时须给 evidence_id（证实它的事实/发现节点 id）；reason=为什么该证据支持这个结论。",
+		obj(map[string]any{
+			"hypothesis_id": idp("假设节点 id"),
+			"state":         str("confirmed（证实）| refuted（推翻）"),
+			"evidence_id":   idp("证实/推翻它的事实/发现节点 id（confirmed 时必填）"),
+			"reason":        str("为什么该证据支持这个结论"),
+		}, "hypothesis_id", "state"),
+		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
+			var a struct {
+				HypothesisID json.RawMessage `json:"hypothesis_id"`
+				State        string          `json:"state"`
+				EvidenceID   json.RawMessage `json:"evidence_id"`
+				Reason       string          `json:"reason"`
+			}
+			_ = json.Unmarshal(in, &a)
+			hyp := pid(a.HypothesisID)
+			if hyp == 0 {
+				return actool.Errorf("hypothesis_id 必填"), nil
+			}
+			if a.State != "confirmed" && a.State != "refuted" {
+				return actool.Errorf("state 只能是 confirmed 或 refuted"), nil
+			}
+			hypNode, err := t.ts.GetNode(hyp)
+			if err != nil || hypNode == nil || hypNode.Kind != db.KindHypothesis {
+				return actool.Errorf("hypothesis_id 必须是本任务的假设(hypothesis)节点"), nil
+			}
+			if ev := pid(a.EvidenceID); ev > 0 {
+				evNode, err := t.ts.GetNodeWithSources(ev)
+				if err != nil || evNode == nil || (evNode.Kind != db.KindFact && evNode.Kind != db.KindFinding) {
+					return actool.Errorf("evidence_id 必须是本任务或直接关联任务的事实/漏洞节点"), nil
+				}
+				_ = t.ts.Link(ev, db.RelProves, hyp) // 证据 --proves--> 假设（谁证实了它）
+			} else if a.State == "confirmed" {
+				return actool.Errorf("confirmed 时须给 evidence_id（证实它的事实/发现节点 id）"), nil
+			}
+			if err := t.ts.SetNodeState(hyp, a.State); err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			return actool.Text(fmt.Sprintf("hypothesis %d marked %s", hyp, a.State)), nil
 		})
 }
 
@@ -2023,11 +2149,25 @@ func (t *ToolSet) PlannerTools() []actool.CoreTool {
 		t.killWorkTool(), t.steerWorkTool(),
 		// report_finding：规划态势研判时若自身已确证漏洞，可直接登记（与 worker 同工具）。
 		t.addFinding(),
+		// resolve_hypothesis：验证意图产出事实后，把对应假设标 confirmed/refuted（Stage 6b）。
+		t.resolveHypothesis(),
 		// list_companies：查看企业列表 + scope + 资产数（拿 company_id / 理解归属范围）。
 		t.listCompanies(),
 		// add_task_scope：主动把整根域/整公司/某子域/IP 纳入本任务测试范围(覆盖度分母)。
 		t.addTaskScope(),
 		// list_untested_assets：按需查本任务范围内未测资产(类型+分页)，自行决定补测。
 		t.listUntestedAssets(),
+	}
+}
+
+// HypothesizerTools is the second brain's tool set (Stage 6b): the same read-only
+// situational tools the planner has, plus record_hypothesis. Deliberately NO
+// add_intent/prove_goal/kill/steer — the second brain only observes and conjectures;
+// turning a hypothesis into a verification intent is the planner's job.
+func (t *ToolSet) HypothesizerTools() []actool.CoreTool {
+	return []actool.CoreTool{
+		t.graphOverview(), t.listFindings(), t.listFacts(), t.nodeDetail(),
+		t.getWorkerOutput(), t.searchAllWorkerTraces(), t.listGoals(),
+		t.recordHypothesis(),
 	}
 }

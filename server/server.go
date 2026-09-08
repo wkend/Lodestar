@@ -332,6 +332,29 @@ func (s *Server) buildCLIWorkerFromEnv() agent.AgentBackend {
 	return cw
 }
 
+// buildHypothesizerFromEnv builds the second brain (Stage 6b) when
+// LODESTAR_BRAIN2_ENABLED is truthy, else nil (→ engine's hypothesizerLoop no-ops).
+// It resolves its LLM like any other agent (own "hypothesizer" binding → global
+// fallback gProv/gCfg — reusing the planner's budget), so no separate provider/rate
+// limiter. LODESTAR_BRAIN2_MODEL optionally overrides the model on the resolved config.
+// 注意:无 hypothesizer 专属 profile binding 时,它与 planner 共用同一 provider→同一
+// rate limiter(设计如此,非 bug);心跳间隔=planner×3,频率低,争用有限。要隔离限流就给
+// hypothesizer 配独立 profile binding。
+func (s *Server) buildHypothesizerFromEnv(gProv llm.Provider, gCfg agent.Config, tx *transcript.Store) *agent.Hypothesizer {
+	if isFalsy(os.Getenv("LODESTAR_BRAIN2_ENABLED")) {
+		return nil
+	}
+	prov, cfg := s.providerForAgent("hypothesizer", nil, gProv, gCfg)
+	if m := strings.TrimSpace(os.Getenv("LODESTAR_BRAIN2_MODEL")); m != "" {
+		cfg.Model = m
+	}
+	h := agent.NewHypothesizer(prov, cfg.Model, s.m.dir, tx, cfg.CompactionWindow(), s.agentMaxTurns("hypothesizer"))
+	h.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
+	h.SetNonStreaming(nonStreamingResolver(cfg))
+	h.SetMaxTokens(maxTokensResolver(cfg))
+	return h
+}
+
 // splitEnvList comma-splits a value into trimmed, non-empty items. Empty in → nil.
 func splitEnvList(s string) []string {
 	var out []string
@@ -513,6 +536,7 @@ func (s *Server) applyLLM(cfg agent.Config) error {
 	s.engine.UseLLM(pl, wk)
 
 	tx := transcript.NewStore(filepath.Join(s.m.dir, "transcripts"))
+	s.engine.SetHypothesizer(s.buildHypothesizerFromEnv(prov, cfg, tx)) // 第二 brain(6b);未开启则 nil
 	win := cfg.CompactionWindow()
 	// mainagent resolves its own binding (→ global fallback); chat stays the GLOBAL
 	// fallback since one ChatAgent serves many agent keys — its per-agent binding is

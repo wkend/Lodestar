@@ -113,6 +113,7 @@ type Engine struct {
 	mu       sync.RWMutex
 	planner  *agent.Planner
 	worker   *agent.Worker
+	hypo     *agent.Hypothesizer // second brain (Stage 6b); nil = disabled → hypothesizerLoop no-ops
 	started  sync.Map // taskID -> bool, so Run is idempotent per task
 	lastAct  sync.Map // taskID -> int64 unix, last planner/worker activity (heartbeat)
 	llmCalls sync.Map // taskID -> *int64, actual planner/worker/main-agent LLM calls
@@ -671,6 +672,21 @@ func (e *Engine) snapshot() (*agent.Planner, *agent.Worker) {
 // nil (the default) means every intent runs on the norma *Worker as before.
 func (e *Engine) SetCLIWorker(w agent.AgentBackend) { e.cliWorker = w }
 
+// SetHypothesizer installs the second brain (Stage 6b, LODESTAR_BRAIN2_ENABLED).
+// nil (the default) means hypothesizerLoop no-ops — behavior unchanged. Set once at
+// startup before any task loop runs; guarded by mu like planner/worker.
+func (e *Engine) SetHypothesizer(h *agent.Hypothesizer) {
+	e.mu.Lock()
+	e.hypo = h
+	e.mu.Unlock()
+}
+
+func (e *Engine) snapshotHy() *agent.Hypothesizer {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.hypo
+}
+
 // pickBackend chooses the primary backend for one intent: the CLI worker when
 // configured, else the per-task norma worker. Global-switch only for now — no
 // per-intent routing until there is a reliable signal for it (see design). The
@@ -747,13 +763,23 @@ func (e *Engine) Run(ctx context.Context, t *Task) {
 		t.Notify() // already running — just nudge a planning round
 		return
 	}
-	rt := e.registerTaskRoutines(ctx, t.ID, 1+workers)
+	// second brain (Stage 6b) gets its own routine only when enabled, so the wg
+	// count stays exact and no idle goroutine spins when it's off.
+	hypoOn := e.snapshotHy() != nil
+	extra := 0
+	if hypoOn {
+		extra = 1
+	}
+	rt := e.registerTaskRoutines(ctx, t.ID, 1+workers+extra)
 	e.deleteMu.RUnlock()
 	e.touch(t.ID)
 	runTaskRoutine(rt, func(loopCtx context.Context) { e.plannerLoop(loopCtx, t) })
 	for i := 0; i < workers; i++ {
 		name := fmt.Sprintf("work#%d", i+1)
 		runTaskRoutine(rt, func(loopCtx context.Context) { e.workerLoop(loopCtx, t, name) })
+	}
+	if hypoOn {
+		runTaskRoutine(rt, func(loopCtx context.Context) { e.hypothesizerLoop(loopCtx, t) })
 	}
 	e.startDeadlineCoordinator(ctx, t) // 任务级超时定时器(仅 timeout>0;去重)
 	// 仅在「完全没有活动意图(open+running)」时才 kick 首轮规划。带种子意图的任务:种子已
@@ -899,6 +925,65 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 			runRound("heartbeat")
 		}
 		// 每次唤醒(边沿或心跳)后重臂心跳:任意规划触发都重算这段静置计时。
+		resetPlannerTimer(heartbeat, interval)
+	}
+}
+
+// hypothesizerLoop drives the second brain (Stage 6b). Unlike plannerLoop it is
+// HEARTBEAT-ONLY (never listens on t.notify) — so it can't race the planner for
+// wake events, and it fires on a slower cadence (planner interval ×3) since
+// situation-level synthesis needn't run every graph change. It mirrors plannerLoop's
+// guard sequence (paused / deleting / settling / terminal / no-open-goal) so a
+// finished, paused, or timing-out task never gets fresh hypotheses. It only runs
+// while a hypothesizer is installed (registered in Run only when enabled).
+func (e *Engine) hypothesizerLoop(ctx context.Context, t *Task) {
+	interval := plannerHeartbeatInterval(t) * 3
+	heartbeat := time.NewTimer(interval)
+	defer heartbeat.Stop()
+
+	runRound := func() {
+		hypo := e.snapshotHy()
+		if hypo == nil {
+			return // disabled / not yet configured
+		}
+		if e.IsPaused(t.ID) || e.IsDeleting(t.ID) || e.isSettling(t.ID) {
+			return
+		}
+		if isTerminalStatus(t.lifecycleSnapshot().Status) {
+			return
+		}
+		// no open goal → task is settling or goalless-direct; conjecturing is pointless.
+		if open, err := t.Store.HasOpenGoal(); err == nil && !open {
+			return
+		}
+		if !e.beginTaskOperation(t.ID) {
+			return
+		}
+		defer e.decInflight(t.ID)
+		e.touch(t.ID)
+		emit := func(r db.Activity) { e.emitActivity(t, r) }
+		ectx := e.clockCtx(e.execContextFor(ctx, t.ID), t, false)
+		if ectx.Err() != nil || e.IsDeleting(t.ID) {
+			return
+		}
+		taskIDInt, _ := strconv.ParseInt(t.ID, 10, 64)
+		log.Printf("[hypothesizer] task %s 态势研判中…", t.ID)
+		e.BeginLLMCall(t.ID)
+		err := hypo.Hypothesize(ectx, taskIDInt, e.m.assets, t.Store, t.Goal, emit)
+		e.EndLLMCall(t.ID)
+		if err != nil && ectx.Err() == nil {
+			log.Printf("[hypothesizer] task %s 研判出错: %v", t.ID, err)
+		}
+		e.touch(t.ID)
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-heartbeat.C:
+			runRound()
+		}
 		resetPlannerTimer(heartbeat, interval)
 	}
 }
