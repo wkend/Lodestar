@@ -160,12 +160,13 @@ func (s *ExplorationStore) Root() (description, goal string, err error) {
 var knownNodeKinds = map[string]bool{
 	KindBegin: true, KindGoal: true, KindIntent: true,
 	KindFact: true, KindFinding: true, KindHint: true,
+	KindHypothesis: true,
 }
 
 // AddNode writes a typed reasoning node with optional anchors to asset ids.
 func (s *ExplorationStore) AddNode(kind string, payload map[string]any, priority int, state, origin string, anchors []int64) (int64, error) {
 	if !knownNodeKinds[kind] {
-		return 0, fmt.Errorf("AddNode: 未知 kind %q（须为 begin/goal/intent/fact/finding/hint 之一）", kind)
+		return 0, fmt.Errorf("AddNode: 未知 kind %q（须为 begin/goal/intent/fact/finding/hint/hypothesis 之一）", kind)
 	}
 	if len(payload) == 0 {
 		return 0, fmt.Errorf("AddNode: payload 不能为空（kind=%s）", kind)

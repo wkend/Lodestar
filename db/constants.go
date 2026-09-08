@@ -8,6 +8,10 @@ const (
 	KindFact    = "fact"    // a worker's exploration result/conclusion (incl. negative results), tied to its intent
 	KindFinding = "finding" // a confirmed vulnerability (report_finding), distinct from a fact
 	KindHint    = "hint"
+	// KindHypothesis is a situation-level conjecture proposed by the second brain
+	// (stage 6): not yet verified, awaiting a planner-dispatched intent to confirm
+	// or refute it. States: open → confirmed | refuted.
+	KindHypothesis = "hypothesis"
 )
 
 // StateOrigin marks the task root fact (KindFact) seeded at task creation — the

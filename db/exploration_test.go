@@ -11,7 +11,7 @@ import (
 func TestAddNodeRejectsGarbage(t *testing.T) {
 	es := &ExplorationStore{} // 校验先于 s.db.Begin()，零值 store 安全
 
-	if _, err := es.AddNode("hypothesis", map[string]any{"x": 1}, 0, "open", "brain", nil); err == nil ||
+	if _, err := es.AddNode("nonsense-kind", map[string]any{"x": 1}, 0, "open", "brain", nil); err == nil ||
 		!strings.Contains(err.Error(), "未知 kind") {
 		t.Fatalf("未知 kind 应被拒绝, got err=%v", err)
 	}
@@ -21,6 +21,33 @@ func TestAddNodeRejectsGarbage(t *testing.T) {
 	}
 	if _, err := es.AddNode(KindFact, nil, 0, "confirmed", "worker", nil); err == nil {
 		t.Fatalf("nil payload 应被拒绝, got err=%v", err)
+	}
+}
+
+// stage 6a: hypothesis 是合法 kind，state 机 open/confirmed/refuted。新库上测的是
+// base CREATE TABLE 的双 CHECK 接受它、并拒绝越界 state;老库的迁移 DO 块路径靠手测
+// (docker)覆盖。base 与迁移块的 state 集合逐字一致,故两者等价有效。
+func TestAddNodeHypothesis(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Skipf("postgres unavailable (%v) — skipping", err)
+	}
+	defer d.Close()
+	expID, err := d.CreateExploration("test", "hypothesis kind")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Exec(`DELETE FROM explorations WHERE id=$1`, expID)
+	es := d.Exploration(expID)
+
+	for _, st := range []string{"open", "confirmed", "refuted"} {
+		if _, err := es.AddNode(KindHypothesis, map[string]any{"summary": "h " + st}, 0, st, "brain", nil); err != nil {
+			t.Fatalf("hypothesis state=%q 应被接受, got err=%v", st, err)
+		}
+	}
+	// 越界 state 应被 PG 的 ck_node_state 拒绝(证明 CHECK 真的按 kind 分支)。
+	if _, err := es.AddNode(KindHypothesis, map[string]any{"summary": "bad"}, 0, "running", "brain", nil); err == nil {
+		t.Fatal("hypothesis state=running 应被 ck_node_state 拒绝")
 	}
 }
 

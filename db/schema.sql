@@ -176,14 +176,15 @@ CREATE TABLE IF NOT EXISTS exploration_nodes (
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     completed_at   TIMESTAMPTZ,
-    CONSTRAINT ck_node_kind CHECK (kind IN ('begin','goal','intent','fact','finding','hint')),
+    CONSTRAINT ck_node_kind CHECK (kind IN ('begin','goal','intent','fact','finding','hint','hypothesis')),
     CONSTRAINT ck_node_state CHECK (
         (kind='begin'   AND state IN ('open')) OR
         (kind='intent'  AND state IN ('open','running','paused','done','blocked','exhausted','stopped')) OR
         (kind='goal'    AND state IN ('open','met','abandoned')) OR
         (kind='fact'    AND state IN ('confirmed','dismissed','origin')) OR
         (kind='finding' AND state IN ('confirmed','dismissed')) OR
-        (kind='hint'    AND state IN ('active','consumed'))
+        (kind='hint'    AND state IN ('active','consumed')) OR
+        (kind='hypothesis' AND state IN ('open','confirmed','refuted'))
     )
 );
 ALTER TABLE exploration_nodes ADD COLUMN IF NOT EXISTS blocked_reason TEXT;
@@ -203,6 +204,31 @@ BEGIN
             (kind='fact'    AND state IN ('confirmed','dismissed','origin')) OR
             (kind='finding' AND state IN ('confirmed','dismissed')) OR
             (kind='hint'    AND state IN ('active','consumed'))
+        );
+    END IF;
+END $$;
+-- hypothesis kind (stage 6): 老库的 ck_node_kind/ck_node_state 不含 hypothesis,
+-- 上面的 paused 迁移块也把 state 重建成了旧集合。这里按"是否已含 hypothesis"补齐两条约束。
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid='exploration_nodes'::regclass
+          AND conname='ck_node_kind'
+          AND pg_get_constraintdef(oid) NOT LIKE '%hypothesis%'
+    ) THEN
+        ALTER TABLE exploration_nodes DROP CONSTRAINT ck_node_kind;
+        ALTER TABLE exploration_nodes ADD CONSTRAINT ck_node_kind
+            CHECK (kind IN ('begin','goal','intent','fact','finding','hint','hypothesis'));
+        ALTER TABLE exploration_nodes DROP CONSTRAINT ck_node_state;
+        ALTER TABLE exploration_nodes ADD CONSTRAINT ck_node_state CHECK (
+            (kind='begin'   AND state IN ('open')) OR
+            (kind='intent'  AND state IN ('open','running','paused','done','blocked','exhausted','stopped')) OR
+            (kind='goal'    AND state IN ('open','met','abandoned')) OR
+            (kind='fact'    AND state IN ('confirmed','dismissed','origin')) OR
+            (kind='finding' AND state IN ('confirmed','dismissed')) OR
+            (kind='hint'    AND state IN ('active','consumed')) OR
+            (kind='hypothesis' AND state IN ('open','confirmed','refuted'))
         );
     END IF;
 END $$;
