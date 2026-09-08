@@ -152,8 +152,24 @@ func (s *ExplorationStore) Root() (description, goal string, err error) {
 	return d.String, goal, err
 }
 
+// knownNodeKinds is the closed set of kinds AddNode accepts — the last gate
+// before a row hits exploration_nodes. Today every caller passes a Kind* const,
+// so this only bites a future writer (e.g. a second brain emitting hypotheses)
+// that hasn't registered its kind; better a caller error than a silent garbage
+// node the graph readers can't classify.
+var knownNodeKinds = map[string]bool{
+	KindBegin: true, KindGoal: true, KindIntent: true,
+	KindFact: true, KindFinding: true, KindHint: true,
+}
+
 // AddNode writes a typed reasoning node with optional anchors to asset ids.
 func (s *ExplorationStore) AddNode(kind string, payload map[string]any, priority int, state, origin string, anchors []int64) (int64, error) {
+	if !knownNodeKinds[kind] {
+		return 0, fmt.Errorf("AddNode: 未知 kind %q（须为 begin/goal/intent/fact/finding/hint 之一）", kind)
+	}
+	if len(payload) == 0 {
+		return 0, fmt.Errorf("AddNode: payload 不能为空（kind=%s）", kind)
+	}
 	raw, _ := json.Marshal(payload)
 	tx, err := s.db.Begin()
 	if err != nil {

@@ -2,8 +2,27 @@ package db
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 )
+
+// AddNode 的 kind/payload 兜底在触库前执行，故零值 store 即可测——不需要 Postgres。
+// 这是"未注册 kind / 空 payload"这类未来写入者(如第二个 brain 发假设)会踩的最后一道闸。
+func TestAddNodeRejectsGarbage(t *testing.T) {
+	es := &ExplorationStore{} // 校验先于 s.db.Begin()，零值 store 安全
+
+	if _, err := es.AddNode("hypothesis", map[string]any{"x": 1}, 0, "open", "brain", nil); err == nil ||
+		!strings.Contains(err.Error(), "未知 kind") {
+		t.Fatalf("未知 kind 应被拒绝, got err=%v", err)
+	}
+	if _, err := es.AddNode(KindFact, map[string]any{}, 0, "confirmed", "worker", nil); err == nil ||
+		!strings.Contains(err.Error(), "payload 不能为空") {
+		t.Fatalf("空 payload 应被拒绝, got err=%v", err)
+	}
+	if _, err := es.AddNode(KindFact, nil, 0, "confirmed", "worker", nil); err == nil {
+		t.Fatalf("nil payload 应被拒绝, got err=%v", err)
+	}
+}
 
 func TestExplorationFlow(t *testing.T) {
 	d, err := Open(testDSN(t))
