@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/Autumn-27/artex/db"
 	acperm "github.com/Autumn-27/norma/permission"
@@ -990,23 +992,81 @@ type intentItem struct {
 	Priority  int               `json:"priority"`
 }
 
+// intentFingerprint 归一化一条意图为去重键：小写 summary、去标点、按词集排序去重，
+// 再拼上排序后的 asset_ids。目的只拦"纯换措辞/大小写/语序/同一句打同一资产"这类
+// 字面重复(与 planner 提示词"只是换个措辞不算新机理"对齐)；同义词改写拦不住,那属
+// 语义判断,不在此列。asset_ids 参与指纹:同一句话打【不同】资产是不同意图,不去重。
+func intentFingerprint(summary string, assetIDs []int64) string {
+	// 词集:小写后按非字母数字切分,去重排序 → 语序无关。中文按 rune 无空格,这里
+	// 主要归一化英文/标点/大小写;中文串整体作为一个 token 也能拦住完全相同的中文句。
+	seen := map[string]bool{}
+	var words []string
+	for _, f := range strings.FieldsFunc(strings.ToLower(summary), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	}) {
+		if !seen[f] {
+			seen[f] = true
+			words = append(words, f)
+		}
+	}
+	sort.Strings(words)
+	ids := append([]int64(nil), assetIDs...)
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	var b strings.Builder
+	for i, id := range ids {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(strconv.FormatInt(id, 10))
+	}
+	return strings.Join(words, " ") + "|" + b.String()
+}
+
+// findDuplicateIntent 在【活跃】意图(open+running)里查与指纹相同的一条，命中返回其 id。
+// 只查活跃意图:recent_done 不拦——planner 提示词允许"出现新机理时重派已尝试方向",
+// 硬拦会误杀正当复核。0 表示无重复。
+func (t *ToolSet) findDuplicateIntent(fp string) int64 {
+	nodes, err := t.ts.ListByKind(db.KindIntent, 200)
+	if err != nil {
+		return 0 // 查重失败不应阻断创建;退化为原行为(仅靠提示词软约束)
+	}
+	for _, n := range nodes {
+		if n.State != "open" && n.State != "running" {
+			continue
+		}
+		// 两边都从 payload 读 asset_ids：新意图侧传的是 pidList(AssetIDs),已存在意图
+		// 侧也存在 payload["asset_ids"](见 addOneIntent)。不能用 n.Anchors——ListByKind
+		// 的 scanNode 不回填该字段(恒 nil),否则带资产的意图两边指纹永不相等、去重失效。
+		var m struct {
+			Summary  string  `json:"summary"`
+			AssetIDs []int64 `json:"asset_ids"`
+		}
+		_ = json.Unmarshal(n.Payload, &m)
+		if intentFingerprint(m.Summary, m.AssetIDs) == fp {
+			return n.ID
+		}
+	}
+	return 0
+}
+
 // addOneIntent 创建一条意图节点并连上游血缘，返回 id。
 // 约束：意图只能锚在已确认知识上——每个 parent_id 必须是已存在的 fact/finding
 // 节点（不能挂在别的意图/目标/提示上）。顶层全新方向留空 parent_ids，兜底连 origin fact。
 // 这样"每个意图都连到 fact 节点、且是发现驱动而非凭空规划"从创建路径上被强制。
-func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
+// dup=true 表示命中了活跃意图去重：未新建节点，id 是已存在意图的 id。
+func (t *ToolSet) addOneIntent(it intentItem) (id int64, dup bool, err error) {
 	if strings.TrimSpace(it.Summary) == "" {
-		return 0, fmt.Errorf("summary 不能为空")
+		return 0, false, fmt.Errorf("summary 不能为空")
 	}
 	// 先校验锚点（建节点前，避免坏锚点留下孤儿意图）。
 	parents := pidList(it.ParentIDs)
 	for _, pidv := range parents {
 		n, err := t.ts.GetNodeWithSources(pidv)
 		if err != nil || n == nil {
-			return 0, fmt.Errorf("parent_id %d 不存在于本任务或直接关联任务：parent_ids 必须是已存在的【事实(fact)/发现(finding)】节点 id；顶层全新方向请留空 parent_ids", pidv)
+			return 0, false, fmt.Errorf("parent_id %d 不存在于本任务或直接关联任务：parent_ids 必须是已存在的【事实(fact)/发现(finding)】节点 id；顶层全新方向请留空 parent_ids", pidv)
 		}
 		if n.Kind != db.KindFact && n.Kind != db.KindFinding {
-			return 0, fmt.Errorf("parent_id %d 是 %q 节点，不能作为意图锚点：意图只能锚在已确认的【事实(fact)/发现(finding)】上，不能挂在意图/目标/提示上；顶层全新方向请留空 parent_ids", pidv, n.Kind)
+			return 0, false, fmt.Errorf("parent_id %d 是 %q 节点，不能作为意图锚点：意图只能锚在已确认的【事实(fact)/发现(finding)】上，不能挂在意图/目标/提示上；顶层全新方向请留空 parent_ids", pidv, n.Kind)
 		}
 	}
 	priority := it.Priority
@@ -1014,13 +1074,19 @@ func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
 		priority = 5
 	}
 	anchors := pidList(it.AssetIDs)
+	// 去重兜底(stage 4):活跃意图里已有字面等价的方向 → 跳过创建，返回其 id。
+	// planner 是唯一意图生成者，提示词已软约束别重复；这里硬拦"换措辞/语序/大小写"
+	// 漏网的重复。命中不建节点、不改已存在意图的血缘，只回其 id 供 planner 引用。
+	if dupID := t.findDuplicateIntent(intentFingerprint(it.Summary, anchors)); dupID > 0 {
+		return dupID, true, nil
+	}
 	payload := map[string]any{"summary": it.Summary}
 	if len(anchors) > 0 {
 		payload["asset_ids"] = anchors
 	}
-	id, err := t.ts.AddIntent(payload, priority, anchors, "planner")
+	id, err = t.ts.AddIntent(payload, priority, anchors, "planner")
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	// upstream lineage: link each (validated) fact/finding parent → this intent, so
 	// "multiple facts combine into one new intent" is expressible.
@@ -1035,7 +1101,7 @@ func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
 			_ = t.ts.Link(origin, db.RelDerivedFrom, id)
 		}
 	}
-	return id, nil
+	return id, false, nil
 }
 
 func (t *ToolSet) addIntent() actool.CoreTool {
@@ -1062,14 +1128,19 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 
 			ids := make([]int64, len(items))
 			errs := map[string]string{}
+			dups := map[string]int64{} // index → 已存在意图 id(命中活跃意图去重)
 			createdAny := false
 			for i, it := range items {
-				id, err := t.addOneIntent(it)
+				id, dup, err := t.addOneIntent(it)
 				if err != nil {
 					errs[strconv.Itoa(i)] = err.Error()
 					continue
 				}
 				ids[i] = id
+				if dup {
+					dups[strconv.Itoa(i)] = id // 未新建,不算 createdAny(无新意图可跑)
+					continue
+				}
 				createdAny = true
 			}
 
@@ -1085,11 +1156,17 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 				if e, bad := errs["0"]; bad {
 					return actool.Errorf(e), nil
 				}
+				if dupID, isDup := dups["0"]; isDup {
+					return actool.Text(fmt.Sprintf("该方向已被活跃意图 #%d 覆盖，未重复创建；如确有新机理请在 summary 里写清与上次的不同", dupID)), nil
+				}
 				return actool.Text(fmt.Sprintf("intent created: %d", ids[0])), nil
 			}
 			out := map[string]any{"ids": ids}
 			if len(errs) > 0 {
 				out["errors"] = errs
+			}
+			if len(dups) > 0 {
+				out["duplicates"] = dups // index→已存在意图 id：这些方向已被活跃意图覆盖，未重复创建
 			}
 			return jsonResult(out)
 		})
