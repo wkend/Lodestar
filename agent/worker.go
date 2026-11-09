@@ -256,7 +256,7 @@ func cmdOutDir(dir string) string { return filepath.Join(dir, "cmd-output") }
 
 func workerSystem(proxyAddr, dataDir, runDir string) string {
 	body := renderSystem("worker", workerDefaultTmpl, WorkerVars{ProxyAddr: proxyAddr, DataDir: dataDir, Now: nowStr()})
-	return body + workerTrafficBlock(proxyAddr) + workerArtifactSpec(runDir)
+	return body + untrustedDataBlock + workerTrafficBlock(proxyAddr) + workerArtifactSpec(runDir)
 }
 
 // renderIntentTask formats the claimed intent for the worker's launch USER message:

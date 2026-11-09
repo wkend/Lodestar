@@ -193,7 +193,7 @@ func lastLine(s string) string {
 
 func (w *CLIWorker) buildPrompt(ctx context.Context, tsx *ToolSet, intent *db.Node, message string) string {
 	var b strings.Builder
-	b.WriteString(cliSystemPreamble)
+	b.WriteString(cliStaticPreamble)
 	if message != "" {
 		b.WriteString("\n\n【操作员实时提示】：" + message + "\n")
 	}
@@ -348,6 +348,11 @@ func parseCLIResult(stdout string) (*cliResult, error) {
 
 const cliSystemPreamble = "你是一个渗透测试执行 agent。你会领到【一条意图】，用你的全部工具能力去完成它，" +
 	"然后把结论以规定的 JSON 格式输出。你只做领到的这条意图，不要扩散到其它方向。"
+
+// cliStaticPreamble is the whole static head of the CLI prompt: role + the
+// code-owned untrusted-data boundary. Combined into one const so the boundary
+// cannot be dropped from the CLI path independently of the role text.
+const cliStaticPreamble = cliSystemPreamble + untrustedDataBlock
 
 const jsonOnlyReprompt = "现在【只】输出上面结论的 JSON（按给定格式，用 ```json 包裹），不要任何其它文字。"
 

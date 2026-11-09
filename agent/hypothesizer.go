@@ -71,7 +71,7 @@ const hypothesizerDefaultTmpl = `你是一个授权渗透测试系统的"态势�
 
 func hypothesizerSystem(goal, workDir string) string {
 	body := renderSystem("hypothesizer", hypothesizerDefaultTmpl, PlannerVars{Goal: goal, Now: nowStr()})
-	return body + artifactSpec(workDir)
+	return body + untrustedDataBlock + artifactSpec(workDir)
 }
 
 // Hypothesize runs one situation-assessment round: read the full overview, emit
