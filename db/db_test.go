@@ -112,3 +112,23 @@ WHERE a.key = 'planner'`).Scan(&plannerVars); err != nil {
 		t.Fatalf("after re-open want %d agents, got %d", wantAgents, agents)
 	}
 }
+
+// The second brain (6b) and the verifier (7b) need an agents row for seedPrompts to
+// reach them at all: it iterates agent keys and skips any agent that doesn't exist.
+func TestBuiltinAgentsIncludeBrainRoles(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Skipf("postgres unavailable (%v) — skipping", err)
+	}
+	defer d.Close()
+
+	for _, key := range []string{"hypothesizer", "verifier"} {
+		a, err := d.GetAgentByKey(key)
+		if err != nil || a == nil {
+			t.Fatalf("agent %q 未 seed: err=%v", key, err)
+		}
+		if !a.Builtin {
+			t.Fatalf("agent %q 应为内置(builtin=true)，否则一键恢复默认不可用", key)
+		}
+	}
+}

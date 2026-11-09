@@ -109,11 +109,13 @@ const ReporterDefaultPrompt = `你是一个授权渗透测试系统里的**漏�
 // source while the same string stays as the in-code render fallback.
 func BuiltinPromptSeeds() map[string]string {
 	return map[string]string{
-		"goals":     goalsDefaultTmpl,
-		"planner":   plannerDefaultTmpl,
-		"mainagent": mainAgentDefaultTmpl,
-		"worker":    workerDefaultTmpl,
-		"auto":      autoDefaultTmpl,
-		"pentest":   pentestDefaultTmpl,
+		"goals":        goalsDefaultTmpl,
+		"planner":      plannerDefaultTmpl,
+		"mainagent":    mainAgentDefaultTmpl,
+		"worker":       workerDefaultTmpl,
+		"auto":         autoDefaultTmpl,
+		"pentest":      pentestDefaultTmpl,
+		"hypothesizer": hypothesizerDefaultTmpl, // 第二 brain(6b)：种子入库后可在 UI 查看/编辑/恢复默认
+		"verifier":     verifierDefaultTmpl,     // 发现复核(7b)：同上
 	}
 }

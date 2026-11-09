@@ -196,6 +196,12 @@ var builtinAgents = []builtinAgent{
 	{"auto", "Auto", "assistant", "平台操作助手：用工具管理任务(建/看/暂停/给提示)与资产，并可创建/修改 skill、自定义工具、MCP。", nil, false, nil},
 	// 渗透测试:内置「独立渗透」agent。经对话页驱动,一人从侦察到收尾走完整条渗透链,自己规划自己执行自己验证。默认开启交互式 shell。
 	{"pentest", "渗透测试", "assistant", "独立渗透 agent：一人从侦察→找攻击面→深入利用→验证→收尾走完整条链，自己规划、自己执行、自己对抗式验证。", nil, true, intp(0)},
+	// 第二 brain(6b)/发现复核(7b):不参与对话页,由引擎按心跳驱动。建行只为一件事——
+	// 让它们的提示词进入 agent_prompts,能在 UI 里查看/编辑/恢复默认(seedPrompts 只处理
+	// 已存在的 agent 行)。role 取 planner/worker 语义上的近邻;enabled/max_turns 等
+	// 运行语义仍由 LODESTAR_BRAIN2_*/LODESTAR_VERIFIER_* 与代码兜底决定,不受此表影响。
+	{"hypothesizer", "态势研判", "planner", "第二 brain：心跳唤醒，横向综合已确认事实，提出跨资产/跨链路的态势级假设，供规划者派意图验证。", nil, false, nil},
+	{"verifier", "发现复核", "worker", "独立复核：重放漏洞 PoC 的只读关键证据，确认发现是否真实，结论写回该发现供规划者与运营者参考。", nil, false, nil},
 }
 
 // seedBuiltins inserts the fixed built-in agents and their variable catalog (idempotent).
