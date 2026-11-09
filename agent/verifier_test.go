@@ -42,3 +42,22 @@ func TestVerifierSystemCarriesBoundaryAndGoal(t *testing.T) {
 		}
 	}
 }
+
+// cleanDeviations must not let a model that fills the field mechanically
+// (`deviations: [{}]`) pollute every fact payload with an empty record.
+func TestCleanDeviationsDropsEmptyEntries(t *testing.T) {
+	got := cleanDeviations([]deviation{
+		{},
+		{Planned: " 直接打 /admin ", Actual: "", Reason: "404"},
+		{Planned: "", Actual: "", Reason: "   "},
+	})
+	if len(got) != 1 {
+		t.Fatalf("expected 1 surviving deviation, got %d", len(got))
+	}
+	if got[0].Planned != "直接打 /admin" || got[0].Reason != "404" {
+		t.Fatalf("entries not trimmed: %+v", got[0])
+	}
+	if len(cleanDeviations(nil)) != 0 {
+		t.Fatal("no deviations must yield zero entries so the payload omits the key")
+	}
+}

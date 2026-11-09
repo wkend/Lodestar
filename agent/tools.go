@@ -440,6 +440,10 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 			if c, ok := fp["confidence"].(string); ok && c != "" {
 				m["confidence"] = c
 			}
+			// 执行偏离原计划的地方：让规划者看见这条意图实际怎么跑偏的，而不只看结果。
+			if ds, ok := fp["deviations"].([]any); ok && len(ds) > 0 {
+				m["deviations"] = ds
+			}
 		}
 		recentFacts = append(recentFacts, m)
 	}
@@ -1327,19 +1331,36 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 		})
 }
 
-// recordFact writes a general exploration RESULT/conclusion (not a vuln, not a
-// new asset) into the EXPLORATION graph, chained to the intent that produced it.
-// This is the home for observations and — importantly — negative results
-// ("port closed", "param not injectable", "no login found"). Such conclusions
-// must NOT be stuffed into the asset graph via upsert_asset.
+// deviation 记录执行者偏离意图原计划的一处（planned vs actual）。
+type deviation struct {
+	Planned string `json:"planned"`
+	Actual  string `json:"actual"`
+	Reason  string `json:"reason"`
+}
+
 // factItem 是 record_fact 批量/单条的一条事实。
 type factItem struct {
 	Summary    string            `json:"summary"`
 	Detail     string            `json:"detail"`
 	Evidence   string            `json:"evidence"`   // 一行关键证据（命令+关键输出行），支撑结论、便于事后核对
 	Confidence string            `json:"confidence"` // observed（直接看到）| inferred（据现象推断）
+	Deviations []deviation       `json:"deviations"` // 执行偏离原计划的地方（没有就不传）
 	IntentID   json.RawMessage   `json:"intent_id"`
 	AssetIDs   []json.RawMessage `json:"asset_ids"`
+}
+
+// cleanDeviations drops empty entries and trims the rest, so a model that emits
+// `deviations: [{}]` (or only planned) doesn't pollute the payload with noise.
+func cleanDeviations(ds []deviation) []deviation {
+	out := make([]deviation, 0, len(ds))
+	for _, d := range ds {
+		p, a, r := strings.TrimSpace(d.Planned), strings.TrimSpace(d.Actual), strings.TrimSpace(d.Reason)
+		if p == "" && a == "" && r == "" {
+			continue
+		}
+		out = append(out, deviation{Planned: p, Actual: a, Reason: r})
+	}
+	return out
 }
 
 // recordOneFact 写一条 fact 节点并连到意图（intent→yields→fact）。defaultIntent 为
@@ -1357,6 +1378,9 @@ func (t *ToolSet) recordOneFact(it factItem, defaultIntent int64) (int64, error)
 	}
 	if c := strings.TrimSpace(it.Confidence); c != "" {
 		payload["confidence"] = c
+	}
+	if ds := cleanDeviations(it.Deviations); len(ds) > 0 {
+		payload["deviations"] = ds
 	}
 	intent := pid(it.IntentID)
 	if intent <= 0 {
@@ -1380,6 +1404,11 @@ func (t *ToolSet) recordOneFact(it factItem, defaultIntent int64) (int64, error)
 	return id, nil
 }
 
+// recordFact writes a general exploration RESULT/conclusion (not a vuln, not a
+// new asset) into the EXPLORATION graph, chained to the intent that produced it.
+// This is the home for observations and — importantly — negative results
+// ("port closed", "param not injectable", "no login found"). Such conclusions
+// must NOT be stuffed into the asset graph via upsert_asset.
 func (t *ToolSet) recordFact() actool.CoreTool {
 	return writeTool("record_fact", "把探索【事实/结论】写入探索图，连到产生它的意图（intent_id）。用于记录探索结果——包括指纹/枚举等【正向结论】，和'端口关闭'/'参数不可注入'/'未发现登录入口'等【否定结论】。\n"+
 		"⚠️一次探索的多个观察要【汇总成一条事实】，不要拆成多条，可以合并成一条事实的就尽量用一条事实表示：summary=对本次结论的总结性一句话，detail=相关细节（可含多个具体项）。例：指纹意图→一条事实 {summary:'识别了 X 站点的技术栈与响应特征', detail:'nginx 1.25 / Vue3 / 200 / title=.. / body_len=..'}，而不是状态码、指纹、标题各记一条。一条意图通常只产出一条事实，拆太碎会让图谱无限膨胀。\n"+
@@ -1395,6 +1424,7 @@ func (t *ToolSet) recordFact() actool.CoreTool {
 			"detail":     str("本事实的相关细节：把这次探索的多个观察事实都写进这里"),
 			"evidence":   str("【一行】关键证据：命令 + 最能证明结论的那一两行输出。务必简洁，不要粘大段输出（细节放 detail）。"),
 			"confidence": str("observed（输出里直接看到）| inferred（据现象推断）。否定结论务必如实标注。"),
+			"deviations": map[string]any{"type": "array", "description": "【可选】你这次偏离意图原计划的地方，元素 {planned,actual,reason}。完全按计划执行就不传——别为了填而填。", "items": map[string]any{"type": "object"}},
 			"asset_ids":  map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "相关资产 id（可选，0/1/多个）：该事实涉及哪些资产"},
 		}),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
