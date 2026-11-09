@@ -2,7 +2,7 @@
 
 多脑协同的自主渗透测试智能体 —— 用一张可追溯的推理图驱动探索，用独立角色互相校验。
 
-个人研究项目。基于 [ARTEX](https://github.com/Autumn-27/ARTEX) 二次开发，融合 [Cairn](https://github.com/oritera/Cairn) 的核心思想。
+个人研究项目。基于 [ARTEX](https://github.com/Autumn-27/ARTEX) 二次开发，融合 [Cairn](https://github.com/oritera/Cairn) 的核心思想，并参考 [sapper-v2](https://github.com/N1nEmAn/sapper-v2) 的角色分工。
 
 ## 这是什么
 
@@ -10,16 +10,19 @@
 
 它不是"更聪明的单 agent"，而是把一次渗透拆成可追溯、可校验、可中断恢复的协作过程。
 
-- **ARTEX 作基座**：双图架构（资产图全局共享 + 探索图任务独占）、事件驱动引擎、norma 进程内 harness、产品层（UI / 流量录制 / 审批门）。
-- **Cairn 作思想**：把通用 agent CLI 当 worker 的可换脑思路、批处理式结论回写、以及"结论要能被独立复核"的取向。
+三个上游各自贡献了不同的东西：
+
+- **ARTEX 作基座**：双图架构（资产图全局共享 + 探索图任务独占）、事件驱动引擎、norma 进程内 harness、产品层（UI / 流量录制 / 审批门）。整个项目的骨架来自这里。
+- **Cairn 作思想**：把通用 agent CLI 当 worker 的可换脑思路、批处理式结论回写。
+- **sapper-v2 作角色参考**：**独立复核者**这一角色划分，以及提示词里的**不可信数据边界**、**执行偏离记录**三个具体做法（MIT 许可）。
 
 在此之上做了三件事：
 
-| 方向 | 解决什么 | 关键实现 |
-|---|---|---|
-| **可换脑的后端** | 白嫖各厂商完整 agentic 能力，又不丢失进程内的实时能力 | `AgentBackend` 接口、`CLIWorker` 批处理回写、失败自动回退 norma |
-| **可验证的写回** | 图谱不被重复和垃圾节点污染 | 意图指纹去重、`AddNode` 单入口校验、执行偏离记录 |
-| **多脑协同** | 单脑容易自欺，也容易漏掉跨线索的关联 | 态势研判者（提假设）、验证者（复核发现） |
+| 方向 | 解决什么 | 关键实现 | 思想来源 |
+|---|---|---|---|
+| **可换脑的后端** | 白嫖各厂商完整 agentic 能力，又不丢失进程内的实时能力 | `AgentBackend` 接口、`CLIWorker` 批处理回写、失败自动回退 norma | Cairn |
+| **可验证的写回** | 图谱不被重复和垃圾节点污染 | 意图指纹去重、`AddNode` 单入口校验、执行偏离记录 | 偏离记录来自 sapper-v2 |
+| **多脑协同** | 单脑容易自欺，也容易漏掉跨线索的关联 | 态势研判者（提假设）、验证者（复核发现） | 验证者角色来自 sapper-v2 |
 
 三者都默认关闭，不配置时行为与上游 ARTEX 一致。
 
@@ -100,9 +103,9 @@ go build -o artex ./cmd/artex && ./artex -addr :8787 -proxy :8788
 
 本项目 vendor 了 ARTEX 源码(`github.com/Autumn-27/artex`,module path 保留),并依赖 [norma](https://github.com/Autumn-27/norma) SDK。ARTEX 与 norma 上游均**未附带 LICENSE 文件**;本仓库为**个人研究、非公开分发**用途。如需再分发或商用,须先联系上游作者获得授权。上游原始 README 保留为 [`README.ARTEX.md`](./README.ARTEX.md)。
 
-Cairn 采用 AGPLv3;本项目仅借鉴其架构思想,未复制其代码。
+Cairn 采用 AGPLv3；本项目仅借鉴其架构思想，未复制其代码。
 
-阶段 7 的角色划分与纪律条文参考了 [sapper-v2](https://github.com/N1nEmAn/sapper-v2)(MIT)的提示词模板。
+[sapper-v2](https://github.com/N1nEmAn/sapper-v2) 采用 MIT 许可。本项目参考其**角色划分**（独立复核者）与**提示词写法**（不可信数据边界、执行偏离记录），按本项目的中文语境与既有架构重写，未复制其 Python 实现或提示词原文。
 
 ## 免责声明
 
