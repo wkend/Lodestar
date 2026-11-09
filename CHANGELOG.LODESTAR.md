@@ -34,6 +34,15 @@
 
 - **`deviations` 字段**（stage 7c）：`record_fact` 可选记录执行偏离原计划之处 `{planned, actual, reason}`，并透出到规划者的 `recent_facts`——让下一轮看见这条意图**实际怎么跑偏的**，而不只看结果。空条目会被过滤，按计划执行的事实 payload 与原来一致。
 
+#### 上下文管理
+
+- **压缩前自我交接**（stage 7d，`agent/handover.go`）：norma 的压缩是有损的——摘要掉对话头部、只留最近的尾巴，只存在于头部的细节就没了。而探索图不随压缩、重启或换人丢失，所以压缩前那一刻正是把状态写进图回报最高的时候。
+  - 接入点是 `agentcore.Options.Deps.CallModel` / `CallModelSync`：每次模型请求的必经之路，状态天然按 run 隔离。`Compactor` 注入不可行（agentcore 内部硬编码 `compaction.New`，`Options` 只收 `*compaction.Config`）
+  - **压缩前**（越过阈值的 85%）：要求立刻 `record_fact` 写一条【交接】事实——已确认结论、未完成项、走过的死路、接手者所需上下文
+  - **压缩后**（观察到的 input token 骤降到上次 60% 以下）：要求先 `list_facts` 找回交接再继续。用 token 降幅判断而非匹配摘要前言字符串，上游改文案不会失效
+  - "已发过"标志只在注入确实能落地时才置位：若那轮历史停在未应答的 `tool_use` 上，追加 user 消息会破坏配对导致 400，此时不置位、等下一轮，否则一次尝试就白白烧掉
+  - 阈值按 compaction 的公式手算（window − reserved − buffer，分档）。刻意近似：没有导出的 `Pre` 钩子，fork SDK 比这个启发式更糟；代码内以 `ponytail:` 注释标注漂移风险
+
 #### 可观测性
 
 - **复核结论贯通到 UI**：`GetFinding` 增加 `LEFT JOIN exploration_nodes` 取 `payload->'verification'`，经 `FindingDTO` 透出到漏洞详情页新增的「独立复核」卡片。

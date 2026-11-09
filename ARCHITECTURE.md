@@ -162,6 +162,33 @@ claimNext: Frontier() 取 open 意图（priority DESC, id ASC）→ ClaimIntent 
 
 **取消语义**用 `context.Cause` 区分：任务级 cancel 与 work 级 cancel 走不同分支。这个设计曾被写成 bug（`workCtx.Err()` 在 unregister 后恒为真），现在的判据是"`workCtx` 出错但 `ectx` 正常"才算被 kill。
 
+### 3.5 上下文压缩与自我交接
+
+长跑的执行者（尤其多阶段利用）必然撞上上下文上限。norma 的压缩是**有损**的：把对话头部摘要成一段文字、保留最近若干条尾巴。只存在于头部里的细节——某个 payload 的变形、某次失败的确切报错——会消失。
+
+但探索图不随压缩丢失，也不随重启或换人丢失。所以**压缩前那一刻**，是把状态写进图回报最高的时刻。`agent/handover.go` 就做这件事：
+
+```
+越过阈值 85%  ──► 要求立刻 record_fact 写【交接】事实
+                        │
+                    压缩发生（lossy）
+                        │
+token 骤降到 60% 以下 ──► 要求先 list_facts 找回交接再继续
+```
+
+**接入点**是 `agentcore.Options.Deps.CallModel` / `CallModelSync`——每次模型请求的必经之路。选它而不是 `Compactor`，是因为后者无法注入：`agentcore` 内部硬编码 `compaction.New(*opts.Compaction, ...)`，`Options` 只接受 `*compaction.Config`，没有传入自定义 `Compactor` 实现的入口。
+
+注入只修改**发出去的请求**，不动存储的历史，所以 transcript 仍是原始完整对话。
+
+两个判定各有一个容易出错的地方：
+
+- **压缩后判定用 token 降幅，不用文案匹配**。若去匹配 norma 的摘要前言字符串，上游改一个字就失效。正常对话只会增长，工作集被压掉才会出现骤降。
+- **"已发过"标志只在注入确实能落地时才置位**。若那轮历史正好停在未应答的 `tool_use` 上，追加 user 消息会破坏 `tool_use`/`tool_result` 配对、请求直接 400。此时必须不置位、等下一轮——否则一次尝试就烧掉了整次机会，而压缩来临时再也不会要求交接。
+
+阈值按 compaction 的公式手算（`window − reservedForSummary − buffer`，buffer 分档）。这是刻意的近似：没有导出的 `Pre` 钩子，fork SDK 比这个启发式更糟。代码内以 `ponytail:` 注释标注了漂移风险——如果 norma 改了阈值算法，这里需要同步。
+
+四个角色都接了守卫，阈值随各自的 context window 变化。压缩摘要调用本身（`ProviderSummarizer`）直接调 provider、不经过 `Deps`，因此不会误触发。
+
 ---
 
 ## 4. 四个智能体
@@ -326,3 +353,5 @@ norma-only 部署时 `primary != worker` 恒为 false，整段回退代码不执
 **轮询 vs 队列**：worker 轮询 frontier 而非订阅队列。多一次 800ms 级延迟的代价，换来的是"意图状态以数据库为唯一真相"——worker 崩了重启后自然接上，不需要重建内存队列。
 
 **两个只读角色共用一条心跳**：它们不响应图变事件，减少了与 planner 的唤醒竞争，代价是产物有最多一个心跳周期的延迟。对"提出假设"和"复核发现"这类非实时任务，这个延迟可以接受。
+
+**交接阈值用启发式而非钩子**：compaction 没有导出的 `Pre` 钩子，无法"恰好在压缩前"插入。这里改为在每个模型请求上估算 token、按阈值提前行动。代价是阈值公式要与上游保持同步（已在代码内标注漂移风险），收益是不必 fork SDK。同样的取舍也用在"压缩后"的判定上——用 token 降幅而非匹配上游的摘要文案。
