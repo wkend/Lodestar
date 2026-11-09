@@ -207,6 +207,43 @@ function FindingDetailInner() {
                   )}
                 </CardContent>
               </Card>
+              {/* 独立复核结论：未复核 / 复现成功 / 复核未通过 —— 三者必须能区分 */}
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-sm">独立复核</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  {!finding.verification ? (
+                    <p className="text-sm text-muted-foreground">
+                      尚未复核。复核是一个独立 agent 重放 PoC 关键证据的过程，未通过不代表漏洞不存在。
+                    </p>
+                  ) : (
+                    <div className="flex flex-col gap-2">
+                      <div className="flex items-center gap-2">
+                        {finding.verification.verified ? (
+                          <Badge variant="outline" className="border-emerald-600 text-emerald-600">
+                            已复现
+                          </Badge>
+                        ) : (
+                          <Badge variant="outline" className="border-amber-600 text-amber-600">
+                            未复现
+                          </Badge>
+                        )}
+                        {finding.verification.by && (
+                          <span className="text-xs text-muted-foreground">
+                            复检者 {finding.verification.by}
+                          </span>
+                        )}
+                      </div>
+                      {!finding.verification.verified && finding.verification.issues && (
+                        <p className="text-sm leading-relaxed whitespace-pre-wrap text-muted-foreground">
+                          {finding.verification.issues}
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
               {/* 证据下方：详细报告(Markdown 渲染) */}
               <Card>
                 <CardHeader className="flex-row items-center justify-between">

@@ -97,3 +97,55 @@ func nodeIDs(ns []*Node) []int64 {
 	}
 	return out
 }
+
+// GetFinding must carry the verdict from the exploration node onto the finding row,
+// and must keep "not yet verified" (nil) distinct from "verified=false".
+func TestGetFindingCarriesVerification(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Skipf("postgres unavailable (%v) — skipping", err)
+	}
+	defer d.Close()
+	tk, err := d.CreateTask("复核详情测试", "目标", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.DeleteTask(tk.ID)
+	es := d.Exploration(tk.ExplorationID)
+
+	nodeID, err := es.AddNode(KindFinding, map[string]any{"summary": "s"}, 5, "confirmed", "worker", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fid, err := d.AddFinding(tk.ID, nodeID, "IDOR", "越权", "high", "s", "poc", "worker", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// before any verdict: nil, not a zero-valued verdict
+	f, err := d.GetFinding(fid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.Verification != nil {
+		t.Fatalf("unverified finding must have nil Verification, got %+v", f.Verification)
+	}
+
+	if err := es.SetFindingVerification(nodeID, false, "重放返回 403", "verifier"); err != nil {
+		t.Fatal(err)
+	}
+	f, err = d.GetFinding(fid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.Verification == nil {
+		t.Fatal("verdict written to the node must surface on the finding row")
+	}
+	if f.Verification.Verified || f.Verification.Issues != "重放返回 403" || f.Verification.By != "verifier" {
+		t.Fatalf("verdict round-trip mismatch: %+v", *f.Verification)
+	}
+	// the report column and the verdict must coexist (two LEFT JOINs, different sources)
+	if f.Report != "" {
+		t.Fatalf("report should stay empty here, got %q", f.Report)
+	}
+}

@@ -28,6 +28,16 @@ type DBFinding struct {
 	Report          string // 详细报告(Markdown);仅 GetFinding 填充,列表查询不带
 	CreatedAt       time.Time
 	TaskDescription string // populated via LEFT JOIN on tasks
+	// Verification 是复核者(stage 7b)写在探索节点 payload 上的结论；仅 GetFinding 填充。
+	// nil = 尚未复核，与"复核未通过"必须可区分。
+	Verification *FindingVerification
+}
+
+// FindingVerification is the verifier's verdict on one finding.
+type FindingVerification struct {
+	Verified bool   `json:"verified"`
+	Issues   string `json:"issues,omitempty"`
+	By       string `json:"by,omitempty"`
 }
 
 // Finding triage states (findings.status).
@@ -625,13 +635,16 @@ func (d *DB) FindingStats() (*FindingStats, error) {
 func (d *DB) GetFinding(id int64) (*DBFinding, error) {
 	f := &DBFinding{}
 	var aidsJSON string
-	err := d.QueryRow(`SELECT `+findingSelectCols+`, COALESCE(f.report, '')
+	var verifJSON sql.NullString
+	err := d.QueryRow(`SELECT `+findingSelectCols+`, COALESCE(f.report, ''),
+		n.payload->'verification'
 		FROM findings f
 		LEFT JOIN tasks t ON f.task_id = t.id
+		LEFT JOIN exploration_nodes n ON n.id = f.node_id
 		WHERE f.id = $1`, id).Scan(
 		&f.ID, &f.TaskID, &f.NodeID, &f.VulnClass, &f.Name, &f.Severity,
 		&f.Summary, &f.Evidence, &f.Worker, &aidsJSON, &f.Status, &f.CreatedAt,
-		&f.TaskDescription, &f.Report)
+		&f.TaskDescription, &f.Report, &verifJSON)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -639,6 +652,12 @@ func (d *DB) GetFinding(id int64) (*DBFinding, error) {
 		return nil, err
 	}
 	_ = json.Unmarshal([]byte(aidsJSON), &f.AssetIDs)
+	if verifJSON.Valid && verifJSON.String != "" && verifJSON.String != "null" {
+		var v FindingVerification
+		if json.Unmarshal([]byte(verifJSON.String), &v) == nil {
+			f.Verification = &v
+		}
+	}
 	return f, nil
 }
 

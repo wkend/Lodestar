@@ -300,6 +300,8 @@ type FindingDTO struct {
 	Summary   string `json:"summary"`
 	Evidence  string `json:"evidence"`
 	Report    string `json:"report,omitempty"` // 详细报告(Markdown);仅详情接口返回,列表为空
+	// Verification 是独立复核者(stage 7b)的结论；nil = 尚未复核（与"复核未通过"可区分）。
+	Verification *FindingVerificationDTO `json:"verification,omitempty"`
 
 	IntentID        string            `json:"intent_id,omitempty"`
 	ParamID         string            `json:"param_id,omitempty"`
@@ -309,6 +311,13 @@ type FindingDTO struct {
 	Inherited       bool              `json:"inherited,omitempty"`
 	Assets          []FindingAssetDTO `json:"assets,omitempty"`
 	TS              string            `json:"ts"`
+}
+
+// FindingVerificationDTO is the independent re-check verdict on one finding.
+type FindingVerificationDTO struct {
+	Verified bool   `json:"verified"`
+	Issues   string `json:"issues,omitempty"` // 仅 verified=false 时非空
+	By       string `json:"by,omitempty"`
 }
 
 // FindingAssetDTO is one asset a finding is anchored to, pre-labelled for display.
@@ -443,6 +452,13 @@ func findingFromDB(f *db.DBFinding, assets map[int64]*db.Asset) FindingDTO {
 	}
 	if f.NodeID != nil {
 		d.IntentID = "" // node_id is the finding node, not the intent; keep IntentID empty
+	}
+	if f.Verification != nil {
+		d.Verification = &FindingVerificationDTO{
+			Verified: f.Verification.Verified,
+			Issues:   f.Verification.Issues,
+			By:       f.Verification.By,
+		}
 	}
 	return d
 }

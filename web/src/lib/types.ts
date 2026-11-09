@@ -454,6 +454,14 @@ export type FindingStatus =
   | "duplicate"
   | "risk_accepted";
 
+// FindingVerification 是独立复核者对该漏洞的复核结论。缺省(undefined)= 尚未复核,
+// 与 verified=false(复核了但没复现成功)是两回事,不要合并展示。
+export interface FindingVerification {
+  verified: boolean;
+  issues?: string; // 仅 verified=false 时有值
+  by?: string;
+}
+
 // FindingAsset 是一个漏洞绑定的资产(已在后端预渲染 label)。
 export interface FindingAsset {
   id: string;
@@ -471,6 +479,7 @@ export interface Finding {
   summary: string;
   evidence: string;
   report?: string; // 详细报告(Markdown);仅详情接口返回,列表为空
+  verification?: FindingVerification; // 独立复核结论;缺省 = 尚未复核
   intent_id?: string;
   param_id?: string;
   task_id?: string;
