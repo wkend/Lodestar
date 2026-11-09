@@ -121,6 +121,11 @@ type Engine struct {
 	deleting sync.Map // taskID -> bool, delete barrier (no new task-owned writes)
 	dropCnt  sync.Map // taskID -> *int64, running count of dropped (unpersistable) activity records
 
+	// finding re-check (Stage 7b): verifier nil = disabled; vfTried = finding node ids
+	// already attempted this process, so a failing finding is not re-run every heartbeat.
+	verifier *agent.Verifier
+	vfTried  sync.Map
+
 	// deleteMu makes installing the delete barrier atomic with registering a new
 	// task operation. Once BeginDelete returns, every admitted writer is reflected
 	// in inflight and every later writer is rejected.
@@ -687,6 +692,20 @@ func (e *Engine) snapshotHy() *agent.Hypothesizer {
 	return e.hypo
 }
 
+// SetVerifier installs the finding re-check role (Stage 7b, LODESTAR_VERIFIER_ENABLED).
+// nil (the default) means verifierLoop no-ops. Set once at startup, guarded by mu.
+func (e *Engine) SetVerifier(v *agent.Verifier) {
+	e.mu.Lock()
+	e.verifier = v
+	e.mu.Unlock()
+}
+
+func (e *Engine) snapshotVf() *agent.Verifier {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.verifier
+}
+
 // pickBackend chooses the primary backend for one intent: the CLI worker when
 // configured, else the per-task norma worker. Global-switch only for now — no
 // per-intent routing until there is a reliable signal for it (see design). The
@@ -766,9 +785,13 @@ func (e *Engine) Run(ctx context.Context, t *Task) {
 	// second brain (Stage 6b) gets its own routine only when enabled, so the wg
 	// count stays exact and no idle goroutine spins when it's off.
 	hypoOn := e.snapshotHy() != nil
+	vfOn := e.snapshotVf() != nil
 	extra := 0
 	if hypoOn {
-		extra = 1
+		extra++
+	}
+	if vfOn {
+		extra++
 	}
 	rt := e.registerTaskRoutines(ctx, t.ID, 1+workers+extra)
 	e.deleteMu.RUnlock()
@@ -780,6 +803,9 @@ func (e *Engine) Run(ctx context.Context, t *Task) {
 	}
 	if hypoOn {
 		runTaskRoutine(rt, func(loopCtx context.Context) { e.hypothesizerLoop(loopCtx, t) })
+	}
+	if vfOn {
+		runTaskRoutine(rt, func(loopCtx context.Context) { e.verifierLoop(loopCtx, t) })
 	}
 	e.startDeadlineCoordinator(ctx, t) // 任务级超时定时器(仅 timeout>0;去重)
 	// 仅在「完全没有活动意图(open+running)」时才 kick 首轮规划。带种子意图的任务:种子已
@@ -975,6 +1001,88 @@ func (e *Engine) hypothesizerLoop(ctx context.Context, t *Task) {
 			log.Printf("[hypothesizer] task %s 研判出错: %v", t.ID, err)
 		}
 		e.touch(t.ID)
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-heartbeat.C:
+			runRound()
+		}
+		resetPlannerTimer(heartbeat, interval)
+	}
+}
+
+// verifierBatch caps how many unverified findings one heartbeat round considers.
+const verifierBatch = 3
+
+// verifierLoop drives the finding re-check (Stage 7b). Heartbeat-only, like
+// hypothesizerLoop, and it never listens on t.notify, so it cannot race the planner.
+// State lives in each finding's payload (no in-memory queue), so a restart resumes
+// the backlog. Each finding is attempted at most once per process (vfTried) so a
+// finding the verifier cannot settle does not get re-run on every heartbeat.
+func (e *Engine) verifierLoop(ctx context.Context, t *Task) {
+	interval := plannerHeartbeatInterval(t)
+	heartbeat := time.NewTimer(interval)
+	defer heartbeat.Stop()
+
+	runRound := func() {
+		vf := e.snapshotVf()
+		if vf == nil {
+			return // disabled / not yet configured
+		}
+		if e.IsPaused(t.ID) || e.IsDeleting(t.ID) || e.isSettling(t.ID) {
+			return
+		}
+		if isTerminalStatus(t.lifecycleSnapshot().Status) {
+			return
+		}
+		nodes, err := t.Store.ListUnverifiedFindings(20)
+		if err != nil {
+			log.Printf("[verifier] task %s 列未复核发现失败: %v", t.ID, err)
+			return
+		}
+		var todo []*db.Node
+		if len(nodes) > 0 {
+			// Admission first: vfTried must be stamped only once this round is actually
+			// admitted. Stamping during selection would burn the one attempt on a finding
+			// that admission then rejects (paused / deleting / concurrency cap).
+			if !e.beginTaskOperation(t.ID) {
+				return
+			}
+			defer e.decInflight(t.ID)
+			for _, n := range nodes {
+				if _, seen := e.vfTried.LoadOrStore(n.ID, true); seen {
+					continue
+				}
+				todo = append(todo, n)
+				if len(todo) == verifierBatch {
+					break
+				}
+			}
+		}
+		if len(todo) == 0 {
+			return
+		}
+		e.touch(t.ID)
+		emit := func(r db.Activity) { e.emitActivity(t, r) }
+		ectx := e.clockCtx(e.execContextFor(ctx, t.ID), t, false)
+		taskIDInt, _ := strconv.ParseInt(t.ID, 10, 64)
+		guard := t.Guard.Hooks()
+		for _, n := range todo {
+			if ectx.Err() != nil || e.IsPaused(t.ID) || e.IsDeleting(t.ID) {
+				return
+			}
+			log.Printf("[verifier] task %s 复核发现 #%d", t.ID, n.ID)
+			e.BeginLLMCall(t.ID)
+			err := vf.Verify(ectx, taskIDInt, t.Store, n, t.Goal, guard, emit)
+			e.EndLLMCall(t.ID)
+			if err != nil && ectx.Err() == nil {
+				log.Printf("[verifier] task %s 复核 #%d 出错: %v", t.ID, n.ID, err)
+			}
+			e.touch(t.ID)
+		}
 	}
 
 	for {

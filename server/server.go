@@ -332,6 +332,34 @@ func (s *Server) buildCLIWorkerFromEnv() agent.AgentBackend {
 	return cw
 }
 
+// verifierMaxTurnsDefault caps the verifier when the DB has no max_turns for the
+// "verifier" agent key; agentMaxTurns returns 0 (= unlimited) for an absent row, and
+// the verifier runs shell against the target, so unlimited is not acceptable.
+const verifierMaxTurnsDefault = 12
+
+// buildVerifierFromEnv builds the finding re-check role (Stage 7b) when
+// LODESTAR_VERIFIER_ENABLED is truthy, else nil (→ engine's verifierLoop no-ops).
+// Resolves its LLM exactly like the hypothesizer (own "verifier" binding → global
+// fallback). LODESTAR_VERIFIER_MODEL optionally overrides the model on the resolved config.
+func (s *Server) buildVerifierFromEnv(gProv llm.Provider, gCfg agent.Config, tx *transcript.Store) *agent.Verifier {
+	if isFalsy(os.Getenv("LODESTAR_VERIFIER_ENABLED")) {
+		return nil
+	}
+	prov, cfg := s.providerForAgent("verifier", nil, gProv, gCfg)
+	if m := strings.TrimSpace(os.Getenv("LODESTAR_VERIFIER_MODEL")); m != "" {
+		cfg.Model = m
+	}
+	turns := s.agentMaxTurns("verifier")
+	if turns <= 0 {
+		turns = verifierMaxTurnsDefault
+	}
+	v := agent.NewVerifier(prov, cfg.Model, s.m.dir, tx, cfg.CompactionWindow(), turns)
+	v.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
+	v.SetNonStreaming(nonStreamingResolver(cfg))
+	v.SetMaxTokens(maxTokensResolver(cfg))
+	return v
+}
+
 // buildHypothesizerFromEnv builds the second brain (Stage 6b) when
 // LODESTAR_BRAIN2_ENABLED is truthy, else nil (→ engine's hypothesizerLoop no-ops).
 // It resolves its LLM like any other agent (own "hypothesizer" binding → global
@@ -537,6 +565,7 @@ func (s *Server) applyLLM(cfg agent.Config) error {
 
 	tx := transcript.NewStore(filepath.Join(s.m.dir, "transcripts"))
 	s.engine.SetHypothesizer(s.buildHypothesizerFromEnv(prov, cfg, tx)) // 第二 brain(6b);未开启则 nil
+	s.engine.SetVerifier(s.buildVerifierFromEnv(prov, cfg, tx))         // 发现复核(7b);未开启则 nil
 	win := cfg.CompactionWindow()
 	// mainagent resolves its own binding (→ global fallback); chat stays the GLOBAL
 	// fallback since one ChatAgent serves many agent keys — its per-agent binding is

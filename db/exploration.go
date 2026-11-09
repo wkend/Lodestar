@@ -245,6 +245,46 @@ func (s *ExplorationStore) SetNodeState(id int64, state string) error {
 	return err
 }
 
+// ListUnverifiedFindings returns up to `limit` confirmed finding nodes in this
+// exploration that have no `verification` verdict yet (oldest first, so the
+// verifier works through the backlog in report order).
+func (s *ExplorationStore) ListUnverifiedFindings(limit int) ([]*Node, error) {
+	if limit <= 0 {
+		limit = 5
+	}
+	rows, err := s.db.Query(`SELECT `+nodeCols+` FROM exploration_nodes
+WHERE exploration_id=$1 AND kind='finding' AND NOT (payload ? 'verification')
+ORDER BY id ASC LIMIT $2`, s.expID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanNodes(rows)
+}
+
+// SetFindingVerification merges a re-verification verdict into a finding node's
+// payload under `verification`. Scoped to kind='finding' so it can never touch a
+// fact/intent/hypothesis. The node state is deliberately left untouched: a failed
+// re-check is recorded as evidence for the operator, not used to auto-dismiss a
+// finding that may still be real.
+func (s *ExplorationStore) SetFindingVerification(id int64, verified bool, issues, by string) error {
+	v, err := json.Marshal(map[string]any{
+		"verified": verified, "issues": issues, "by": by,
+	})
+	if err != nil {
+		return err
+	}
+	res, err := s.db.Exec(`UPDATE exploration_nodes SET payload = payload || jsonb_build_object('verification', $1::jsonb)
+WHERE id=$2 AND exploration_id=$3 AND kind='finding'`, string(v), id, s.expID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("finding %d not found in this exploration", id)
+	}
+	return nil
+}
+
 // UpdateGoalPayload rewrites a goal node's payload text (and optional vulnclass);
 // scoped to kind='goal' so it can never mutate an intent/fact by id. Returns an
 // error if no such goal exists in this exploration.
