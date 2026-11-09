@@ -127,6 +127,7 @@ func (v *Verifier) Verify(ctx context.Context, taskID int64, ts *db.ExplorationS
 		ToolOutputDir:   cmdOutDir(taskDir),
 		MaxTurns:        v.maxTurns,
 		Compaction:      compactionConfig(v.window),
+		Deps:            handoverDeps(v.prov, v.window), // 压缩前自我交接(7d)
 		NonStreaming:    v.nonStreaming(),
 		MaxTokens:       v.maxTokens(),
 	}

@@ -114,6 +114,7 @@ func (h *Hypothesizer) Hypothesize(ctx context.Context, taskID int64, as *db.Ass
 		ToolOutputDir:   cmdOutDir(taskDir),
 		MaxTurns:        h.maxTurns,
 		Compaction:      compactionConfig(h.window),
+		Deps:            handoverDeps(h.prov, h.window), // 压缩前自我交接(7d)
 		NonStreaming:    h.nonStreaming(),
 		MaxTokens:       h.maxTokens(),
 	}
