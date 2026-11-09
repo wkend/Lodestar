@@ -230,9 +230,7 @@ function FindingDetailInner() {
                           </Badge>
                         )}
                         {finding.verification.by && (
-                          <span className="text-xs text-muted-foreground">
-                            复检者 {finding.verification.by}
-                          </span>
+                          <span className="text-xs text-muted-foreground">复检者 {finding.verification.by}</span>
                         )}
                       </div>
                       {!finding.verification.verified && finding.verification.issues && (
