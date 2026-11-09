@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/Autumn-27/artex/db"
 )
 
 // Pure (no database) checks for the verifier role: the verdict tool's argument
@@ -59,5 +61,37 @@ func TestCleanDeviationsDropsEmptyEntries(t *testing.T) {
 	}
 	if len(cleanDeviations(nil)) != 0 {
 		t.Fatal("no deviations must yield zero entries so the payload omits the key")
+	}
+}
+
+// The verdict must actually reach the planner: a finding the verifier could not
+// re-check has to surface verified=false + the reason, or the whole role is dead data.
+func TestCompactFindingCarriesVerification(t *testing.T) {
+	pass := &db.Node{ID: 1, Kind: db.KindFinding, State: "confirmed",
+		Payload: []byte(`{"summary":"A","severity":"high","verification":{"verified":true}}`)}
+	got := compactFinding(pass)
+	if v, ok := got["verified"].(bool); !ok || !v {
+		t.Fatalf("verified=true must be surfaced: %+v", got)
+	}
+	if _, ok := got["verify_issues"]; ok {
+		t.Fatalf("a passing verdict must not carry issues: %+v", got)
+	}
+
+	fail := &db.Node{ID: 2, Kind: db.KindFinding, State: "confirmed",
+		Payload: []byte(`{"summary":"B","verification":{"verified":false,"issues":"重放返回 403"}}`)}
+	got = compactFinding(fail)
+	if v, ok := got["verified"].(bool); !ok || v {
+		t.Fatalf("verified=false must be surfaced: %+v", got)
+	}
+	if got["verify_issues"] != "重放返回 403" {
+		t.Fatalf("failure reason must reach the planner: %+v", got)
+	}
+
+	// unverified finding: no verdict keys at all, so an un-run check is distinguishable
+	// from a failed one.
+	bare := &db.Node{ID: 3, Kind: db.KindFinding, State: "confirmed", Payload: []byte(`{"summary":"C"}`)}
+	got = compactFinding(bare)
+	if _, ok := got["verified"]; ok {
+		t.Fatalf("unverified finding must not claim a verdict: %+v", got)
 	}
 }

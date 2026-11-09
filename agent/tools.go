@@ -891,6 +891,18 @@ func compactFinding(n *db.Node) map[string]any {
 	if sv, ok := p["severity"]; ok && sv != nil && sv != "" {
 		m["severity"] = sv
 	}
+	// 复核结论（stage 7b）：让规划者知道这条发现是否被独立重放过，以及没通过的原因。
+	// 未通过的发现仍保留 state=confirmed——那只是给规划者一个"证据存疑、值得复查"的信号。
+	if v, ok := p["verification"].(map[string]any); ok {
+		if verified, ok := v["verified"].(bool); ok {
+			m["verified"] = verified
+			if !verified {
+				if iss, ok := v["issues"].(string); ok && iss != "" {
+					m["verify_issues"] = iss
+				}
+			}
+		}
+	}
 	return m
 }
 
