@@ -15,7 +15,7 @@ services:
     restart: unless-stopped
 
   lodestar:
-    image: autumn27/lodestar:${LODESTAR_TAG:-latest}
+    image: wkendsec/lodestar:${LODESTAR_TAG:-latest}
     depends_on:
       postgres:
         condition: service_healthy

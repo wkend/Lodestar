@@ -120,7 +120,7 @@ jobs:
       - uses: docker/metadata-action@v5
         id: meta
         with:
-          images: autumn27/lodestar
+          images: wkendsec/lodestar
           tags: |
             type=ref,event=tag
             type=raw,value=latest
