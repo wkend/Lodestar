@@ -847,6 +847,9 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 	heartbeat := time.NewTimer(interval)
 	defer heartbeat.Stop()
 
+	// 心跳空转门控的基线，见 planner_idle.go。
+	var idle plannerIdleGate
+
 	// runRound 跑一轮规划(含 debounce 合并 + 各 guard)。src 仅用于日志区分触发来源。
 	runRound := func(src string) {
 		// debounce: coalesce a burst of changes into one planning round
@@ -921,6 +924,12 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		e.BeginLLMCall(t.ID)
 		met, reason, err := planner.Plan(ectx, taskIDInt, e.m.assets, t.Store, t.Goal, triggers, emit)
 		e.EndLLMCall(t.ID)
+		// 记录本轮结束后的图为空转基线；指纹查询失败则清空基线，下一个心跳必定规划。
+		if fp, ferr := t.Store.GraphFingerprint(); ferr != nil {
+			idle = plannerIdleGate{}
+		} else {
+			idle.planned(time.Now(), fp)
+		}
 		switch {
 		case err != nil && ectx.Err() == nil:
 			log.Printf("[planner] task %s 规划出错: %v", t.ID, err)
@@ -948,6 +957,9 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 			runRound("edge") // worker 结束 / finding / kill / resume / seed 首轮
 		case <-heartbeat.C:
 			// 周期兜底:死锁兜底 + 唤醒去监督飞行中的 worker(steer/kill) + 周期复查。
+			if !heartbeatDue(t, &idle) {
+				break // 空转门控：图无变化且未满两个窗口，本次心跳不规划
+			}
 			runRound("heartbeat")
 		}
 		// 每次唤醒(边沿或心跳)后重臂心跳:任意规划触发都重算这段静置计时。

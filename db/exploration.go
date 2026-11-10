@@ -988,6 +988,18 @@ func (s *ExplorationStore) Stats() (map[string]int, error) {
 	return out, rows.Err()
 }
 
+// GraphFingerprint summarises the graph for change detection: the max node id
+// (catches new nodes) plus per-(kind,state) counts (catches state transitions).
+// Two equal fingerprints mean nothing structural changed between them.
+func (s *ExplorationStore) GraphFingerprint() (string, error) {
+	var fp string
+	err := s.db.QueryRow(`SELECT (SELECT COALESCE(max(id),0) FROM exploration_nodes WHERE exploration_id=$1)::text
+  || '|' || COALESCE((SELECT string_agg(k||':'||st||'='||c, ',' ORDER BY k,st)
+     FROM (SELECT kind k, state st, count(*) c FROM exploration_nodes
+           WHERE exploration_id=$1 GROUP BY kind,state) g), '')`, s.expID).Scan(&fp)
+	return fp, err
+}
+
 // --- activity (poll by global id cursor) ---
 
 // AppendActivity records one worker step and returns its id.
