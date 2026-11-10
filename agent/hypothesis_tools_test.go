@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Autumn-27/artex/db"
+	"github.com/wkend/lodestar/db"
 )
 
 // TestHypothesisToolsLifecycle 端到端覆盖第二 brain(6b)的两把工具 +意图锚点放宽:

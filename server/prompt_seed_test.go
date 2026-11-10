@@ -3,8 +3,8 @@ package server
 import (
 	"testing"
 
-	"github.com/Autumn-27/artex/agent"
-	"github.com/Autumn-27/artex/db"
+	"github.com/wkend/lodestar/agent"
+	"github.com/wkend/lodestar/db"
 )
 
 // seedPrompts iterates agent.BuiltinPromptSeeds() and skips any key whose agent row

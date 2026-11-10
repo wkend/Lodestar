@@ -3,7 +3,7 @@ package agent
 import (
 	"context"
 
-	"github.com/Autumn-27/artex/db"
+	"github.com/wkend/lodestar/db"
 	"github.com/Autumn-27/norma/harness"
 )
 
@@ -13,7 +13,7 @@ import (
 // no changes.
 //
 // The two implementations Lodestar targets:
-//   - *Worker (NormaWorker): in-process norma harness. Full ARTEX capability —
+//   - *Worker (NormaWorker): in-process norma harness. Full Lodestar capability —
 //     real-time graph writeback, cross-worker trace search, guard hooks.
 //   - CLIWorker (planned): delegates one intent to a general-purpose agent CLI
 //     subprocess (claude/codex) and writes the batched result back through the

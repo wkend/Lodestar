@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/Autumn-27/artex/db"
+	"github.com/wkend/lodestar/db"
 	"github.com/Autumn-27/norma/harness"
 )
 

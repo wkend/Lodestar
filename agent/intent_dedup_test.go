@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Autumn-27/artex/db"
+	"github.com/wkend/lodestar/db"
 )
 
 // intentFingerprint 是 stage 4 去重的核心：字面归一化(大小写/语序/标点/去重词) +

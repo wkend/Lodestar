@@ -7,9 +7,9 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/Autumn-27/artex/db"
-	"github.com/Autumn-27/artex/guard"
-	"github.com/Autumn-27/artex/intercept"
+	"github.com/wkend/lodestar/db"
+	"github.com/wkend/lodestar/guard"
+	"github.com/wkend/lodestar/intercept"
 	"github.com/Autumn-27/norma/llm"
 )
 

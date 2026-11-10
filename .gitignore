@@ -35,7 +35,7 @@ Thumbs.db
 .claude/
 
 # 内嵌前端的单二进制产物
-/artex
+/lodestar
 /server/webui/dist/
 /dist/
 

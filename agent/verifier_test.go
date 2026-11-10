@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Autumn-27/artex/db"
+	"github.com/wkend/lodestar/db"
 )
 
 // Pure (no database) checks for the verifier role: the verdict tool's argument

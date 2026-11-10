@@ -2,7 +2,7 @@
 
 本文描述 Lodestar 的运行时结构：两张图怎么组织、一条意图怎么从生成走到写回、四个智能体各自扮演什么角色，以及哪些边界是硬约束。
 
-面向改造本项目的人。上游 ARTEX 的能力细节见 [`README.ARTEX.md`](./README.ARTEX.md)，增量改造清单见 [`CHANGELOG.LODESTAR.md`](./CHANGELOG.LODESTAR.md)。
+面向改造本项目的人。上游 Lodestar 的能力细节见 [`README.Lodestar.md`](./README.Lodestar.md)，增量改造清单见 [`CHANGELOG.LODESTAR.md`](./CHANGELOG.LODESTAR.md)。
 
 ---
 
@@ -281,13 +281,13 @@ pickBackend(norma) → cliWorker != nil ? cliWorker : norma
 | 跨 worker 轨迹共享 | 是，`search_all_worker_traces` 可见 | **否**，内部步骤不落 activity |
 | guard/intercept 拦截 | 是，每次工具调用都过 | **否**，子进程自身的 Bash 不受控 |
 | 代理录制 | 是 | 是（env 强制注入） |
-| 能力广度 | ARTEX 内置工具 | 各厂商完整 agentic 能力 |
+| 能力广度 | Lodestar 内置工具 | 各厂商完整 agentic 能力 |
 
 后两项"否"是 CLI 后端的**刻意天花板**，写在代码注释里，并在 README 中标注为授权实验室场景的已知限制。
 
 ### 回退链
 
-CLI 失败（坏 key / 代理 / 5xx / 持续 `model_error`）且本次运行未被取消/暂停/kill/收尾时，用 norma 对同一意图重跑一次。这把 CLI 的能力天花板降级为完整 ARTEX 能力，而非让意图死路。
+CLI 失败（坏 key / 代理 / 5xx / 持续 `model_error`）且本次运行未被取消/暂停/kill/收尾时，用 norma 对同一意图重跑一次。这把 CLI 的能力天花板降级为完整 Lodestar 能力，而非让意图死路。
 
 norma-only 部署时 `primary != worker` 恒为 false，整段回退代码不执行——与改造前逐字节等价。
 

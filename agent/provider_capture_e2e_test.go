@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Autumn-27/artex/llmrec"
+	"github.com/wkend/lodestar/llmrec"
 	"github.com/Autumn-27/norma/llm"
 )
 

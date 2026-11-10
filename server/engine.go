@@ -11,9 +11,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/Autumn-27/artex/agent"
-	"github.com/Autumn-27/artex/db"
-	"github.com/Autumn-27/artex/intercept"
+	"github.com/wkend/lodestar/agent"
+	"github.com/wkend/lodestar/db"
+	"github.com/wkend/lodestar/intercept"
 	"github.com/Autumn-27/norma/harness"
 	"github.com/Autumn-27/norma/llm"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -1236,7 +1236,7 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker age
 	// or a persistent model_error) and the run wasn't cancelled/paused/killed/
 	// settling, re-run the SAME intent once on the in-process norma worker. This is
 	// the safety net for the deliberate CLI ceilings (no live trace share, subprocess
-	// Bash not guard-gated): a failed delegation degrades to full ARTEX capability
+	// Bash not guard-gated): a failed delegation degrades to full Lodestar capability
 	// instead of dead-ending the intent. Skipped when the CLI already produced a
 	// clean run (err==nil) or when norma was the primary (no fallback to itself).
 	if primary != worker && retryableWorkerModelError(reason, err) &&

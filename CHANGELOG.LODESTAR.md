@@ -1,12 +1,12 @@
 # Lodestar 变更日志
 
-本文件记录 **Lodestar 相对上游 ARTEX 的增量改造**。上游自身的发布记录见 [`CHANGELOG.md`](./CHANGELOG.md)，两者互不覆盖：`CHANGELOG.md` 描述 ARTEX 基座的能力演进，本文件只描述 Lodestar 在其上新增或改动的部分。
+本文件记录 **Lodestar 相对上游基座的增量改造**，只描述 Lodestar 在上游之上新增或改动的部分。上游基座见 README 的「参考」一节。
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
 ## [Unreleased]
 
-> Lodestar 目前没有独立的版本号与 release tag（`build.sh` 里的 `ARTEX_BUILD_VERSION`
+> Lodestar 目前没有独立的版本号与 release tag（`build.sh` 里的 `LODESTAR_BUILD_VERSION`
 > 取自 git tag，而仓库尚无 tag）。在引入版本号之前，本文件按日期倒序累积记录。
 
 ---
@@ -70,7 +70,7 @@
 
 ### 2026-09-08 — 阶段 1–6b：换脑基座与多脑协同
 
-本批提交把单脑 ARTEX 引擎改造成**可换脑的双图自主渗透系统**，并按"能力分层 → 写回校验 → 多脑协同"的顺序逐段加固。
+本批提交把单脑 Lodestar 引擎改造成**可换脑的双图自主渗透系统**，并按"能力分层 → 写回校验 → 多脑协同"的顺序逐段加固。
 
 #### 架构基座
 
@@ -80,7 +80,7 @@
   - 解析失败时二次索要纯 JSON；仍失败则按"已探索但无产出"处理，不进入错误循环
   - 代理环境变量强制子进程 HTTP 走录制 MITM
   - 写回失败（而非静默吞掉）会 emit 一条 note，避免"报成功但数据丢了"
-- **CLI 后端优先 + norma 回退**（stage 3）：`LODESTAR_CLI_ENABLED` 开启时 `CLIWorker` 作 primary，CLI 子进程失败（坏 key / 代理 / 5xx / 持续 `model_error`）且本次运行未被取消/暂停/kill/收尾时，对同一意图用进程内 norma 重跑一次——把 CLI 的能力上限降级为完整 ARTEX 能力，而非让意图死路。norma-only 部署下整段回退恒不触发，与改动前逐字节等价。
+- **CLI 后端优先 + norma 回退**（stage 3）：`LODESTAR_CLI_ENABLED` 开启时 `CLIWorker` 作 primary，CLI 子进程失败（坏 key / 代理 / 5xx / 持续 `model_error`）且本次运行未被取消/暂停/kill/收尾时，对同一意图用进程内 norma 重跑一次——把 CLI 的能力上限降级为完整 Lodestar 能力，而非让意图死路。norma-only 部署下整段回退恒不触发，与改动前逐字节等价。
 
 **已知上限**（授权实验室场景）：CLI worker 的内部步骤不落 activity，`search_all_worker_traces` 看不到；子进程自身的 Bash 不受 guard/intercept 拦截。依赖轨迹共享的意图由 `pickBackend` 路由到 norma。
 
@@ -112,6 +112,6 @@
 
 ## 参考与致谢
 
-- 基座：[ARTEX](https://github.com/Autumn-27/ARTEX)（module path 保留）
+- 基座：见 README「参考」一节。module path 已从上游改为 `github.com/wkend/lodestar`。
 - 思想：[Cairn](https://github.com/oritera/Cairn)（可换脑、两阶段收尾兜底）
 - stage 7 的角色划分与纪律条文参考：[sapper-v2](https://github.com/N1nEmAn/sapper-v2)（MIT）的 `templates/*.md`
