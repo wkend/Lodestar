@@ -126,6 +126,7 @@ func (r *Recorder) Stream(ctx context.Context, req llm.CompletionRequest) iter.S
 			textBuf     strings.Builder
 			thinkingBuf strings.Builder
 			usage       llm.Usage
+			startUsage  llm.Usage
 			stopReason  string
 			streamErr   error
 		)
@@ -154,10 +155,10 @@ func (r *Recorder) Stream(ctx context.Context, req llm.CompletionRequest) iter.S
 			}
 			// Always track usage (cheap); accumulate text/thinking only for bodies.
 			// Anthropic (and the other providers) split token usage across events:
-			// message_start carries ONLY the input side (input + cache), message_delta
-			// ONLY the output. They must be FOLDED with Add — overwriting on delta
-			// would zero out the input already counted at start (mirrors the SDK's own
-			// llm.Accumulator; see norma/llm/accumulate.go).
+			// message_start reports the input side, message_delta the output and may
+			// re-echo or (on some endpoints) first report the input. Only the part of
+			// message_delta above message_start is new, as in the SDK's llm.Accumulator
+			// (see norma/llm/accumulate.go, ExcessUsage).
 			switch ev.Type {
 			case llm.SETextDelta:
 				if recordBodies {
@@ -169,11 +170,12 @@ func (r *Recorder) Stream(ctx context.Context, req llm.CompletionRequest) iter.S
 				}
 			case llm.SEMessageStart:
 				usage.Add(ev.Usage)
+				startUsage = ev.Usage
 			case llm.SEMessageDelta:
 				if ev.StopReason != "" {
 					stopReason = ev.StopReason
 				}
-				usage.Add(ev.Usage)
+				usage.Add(llm.ExcessUsage(ev.Usage, startUsage))
 			}
 			if !yield(ev, err) {
 				return
