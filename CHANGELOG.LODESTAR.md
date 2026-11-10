@@ -13,10 +13,10 @@
 
 ### 2026-11-10 — 已知问题（待修复）
 
-- **Anthropic 兼容端点的输入 token 计量为 0**。`norma` 的累加逻辑假定 `input_tokens` 在 `message_start` 中给出、`message_delta` 只给输出，因此 input 与 cache 字段被计为 0。原始 SSE 抓包显示，智谱端点（`open.bigmodel.cn/api/anthropic`）的 `message_start` 中 `input_tokens` 为 0，真实值 13 出现在 `message_delta` 中。
+- **Anthropic 兼容端点的输入 token 计量为 0**。`norma` 解析器在 `message_delta` 中只保留 output，丢弃了 input 与 cache 字段，因此这些字段为 0（累加器本身没有错）。原始 SSE 抓包显示，智谱端点（`open.bigmodel.cn/api/anthropic`）的 `message_start` 中 `input_tokens` 为 0，真实值 13 出现在 `message_delta` 中。
   - 影响范围：活动表 `usage` 405 行中 `input_tokens` 与 `cache_read_tokens` 全部为 0，`output_tokens` 全部非零。输出 token 可信，输入与缓存 token 不可信。任务级 `tokens` 面板因此偏低。
   - 证据限制：结论来自一次 `ping` 探测的单个 SSE 响应，以及数据库内 405 行统计；未与服务商账单核对，未在其他端点或其他 prompt 长度上复验。
-  - 修复方向待定：在 `message_delta` 时补取 input（需改 `norma` 或在 `Accumulator` 层修正），或只对该端点的 input 做容错。修复前，不以 `tokens` 面板数值作为成本依据。
+  - 修复：`third_party/norma` 本地 fork（`go.mod` 的 `replace`）。解析器保留 `message_delta` 的完整 usage；`Accumulator` 与 `llmrec` 只累加超出 `message_start` 的部分（`ExcessUsage`），Anthropic 回显的 input 不会重复计数。新增 `llm/anthropic_delta_input_test.go` 两个用例。修复后需重启服务，旧进程仍是旧逻辑。修复前的 405 行数据不会回填。
 - **超时收尾的延迟来自模型响应，而非收尾逻辑**。任务 1 在 11:44:27 到达截止，终局判定于 11:47:02 完成。活动表显示两次终局模型调用各约 30 秒，中间没有阻塞。worker 在硬超时兜底触发后被强制中断，意图标记为 `blocked` 或 `exhausted`。
   - 这是对早先"收尾卡住"判断的更正：状态接口在收尾完成前确实显示 `running`，但日志与活动表证明收尾正常完成。
 
