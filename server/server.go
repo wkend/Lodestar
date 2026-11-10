@@ -1814,6 +1814,8 @@ func (s *Server) getTask(w http.ResponseWriter, r *http.Request) {
 	dto := taskDTO(t, s.resolvedTaskStatus(t))
 	archiveBlockers, _ := s.m.PG().TaskArchiveBlockers()
 	applyTaskArchiveBlocker(&dto, archiveBlockers)
+	metrics, _ := s.m.PG().TaskListMetricsAll()
+	dto.Tokens = tokenTotalDTO(metrics[t.ExpID].Tokens)
 	writeJSON(w, 200, dto)
 }
 
