@@ -11,6 +11,14 @@
 
 ---
 
+### 2026-11-11 — 空转门控与输入 token 计量的端到端验证
+
+- **心跳空转门控（`955a926`）端到端验证通过**。实测任务（本地 Juice Shop 环境，心跳 600s，任务目标写入「禁止主动结束」约束使其保持未完成）：连续两个周期内，图无变化时的 10 分钟心跳全部被门控跳过（期间 `activity` 表无任何规划轮次、零 LLM 调用）；规划严格在距上轮规划结束 60 分钟（两个 30 分钟窗口）时触发——`12:45:28` 基线 → `13:45:29` 第 2 轮（60m 01s）→ `14:46:06` 第 3 轮（60m 01s）——且每次触发后计数器正确重置。空转期间的规划轮内容为「心跳巡检，零动作」，不产生新节点。
+- **输入 token 计量修复（`432af24`）线上数据验证通过**。同一实测任务的 `usage`/`result` 行中 `input_tokens`（4211、11703）与 `cache_read_tokens`（576）均正常非零落库，智谱端点（`open.bigmodel.cn/api/anthropic`）的 input 不再丢失。
+- 上述两项原先只覆盖单元测试（`TestPlannerIdleGate` 与 `llm/anthropic_delta_input_test.go`），本次补齐真实运行验证。验证环境：本地 Docker（`lodestar-pg-local` + `lodestar-juiceshop`），模型 `GLM-5.3-Flash`。
+
+---
+
 ### 2026-11-10 — 已知问题（待修复）
 
 - **Anthropic 兼容端点的输入 token 计量为 0**。`norma` 解析器在 `message_delta` 中只保留 output，丢弃了 input 与 cache 字段，因此这些字段为 0（累加器本身没有错）。原始 SSE 抓包显示，智谱端点（`open.bigmodel.cn/api/anthropic`）的 `message_start` 中 `input_tokens` 为 0，真实值 13 出现在 `message_delta` 中。

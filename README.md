@@ -113,8 +113,8 @@ go test ./server -run TestPlannerIdleGate -count=1
 
 - **按意图分派后端未实现。** 目前是全局开关，要么全部走 CLI，要么全部走 norma。
 - **CLI 后端的可见性不完整。** 子进程内部的步骤不写入 activity，`search_all_worker_traces` 看不到这些步骤。子进程自带的 Bash 也不受 guard 和 intercept 拦截。这些限制只适用于授权实验室场景。
-- **输入 token 计数问题已修复，线上数据未复核。** 智谱等 Anthropic 兼容端点把真实的 input 放在 `message_delta` 中，norma 原先只从 `message_start` 计数，导致 input 为 0。修复见提交 `432af24`，有两个单元测试覆盖。根因和修复记录见 [`CHANGELOG.LODESTAR.md`](./CHANGELOG.LODESTAR.md)。
-- **空转门控只有单元测试。** 心跳在图无变化时不规划，等满两个窗口（60 分钟）才规划一次。端到端行为尚未验证。
+- **输入 token 计数问题已修复并经线上验证。** 智谱等 Anthropic 兼容端点把真实的 input 放在 `message_delta` 中，norma 原先只从 `message_start` 计数，导致 input 为 0。修复见提交 `432af24`。2026-11-11 实测任务（Task 1「空转门控实测」）的 `usage`/`result` 行中 `input_tokens`（4211、11703）与 `cache_read_tokens`（576）均正常非零落库。根因和修复记录见 [`CHANGELOG.LODESTAR.md`](./CHANGELOG.LODESTAR.md)。
+- **空转门控已端到端验证。** 心跳在图无变化时不规划，等满两个窗口（60 分钟）才规划一次。2026-11-11 实测：连续两个周期内，10 分钟心跳全部被门控跳过（零 LLM 调用），规划严格在距上轮结束 60 分钟（60m 01s）时触发，且触发后计数器正确重置。
 
 ## 仓库结构
 
