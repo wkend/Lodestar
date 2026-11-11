@@ -122,7 +122,8 @@ type Engine struct {
 	dropCnt  sync.Map // taskID -> *int64, running count of dropped (unpersistable) activity records
 
 	// finding re-check (Stage 7b): verifier nil = disabled; vfTried = finding node ids
-	// already attempted this process, so a failing finding is not re-run every heartbeat.
+	// whose verify session COMPLETED this process (err==nil, verdict recorded or "cannot
+	// settle"). A provider-failed session is not stamped and retries next heartbeat.
 	verifier *agent.Verifier
 	vfTried  sync.Map
 
@@ -1032,8 +1033,9 @@ const verifierBatch = 3
 // verifierLoop drives the finding re-check (Stage 7b). Heartbeat-only, like
 // hypothesizerLoop, and it never listens on t.notify, so it cannot race the planner.
 // State lives in each finding's payload (no in-memory queue), so a restart resumes
-// the backlog. Each finding is attempted at most once per process (vfTried) so a
-// finding the verifier cannot settle does not get re-run on every heartbeat.
+// the backlog. A finding whose verify session COMPLETED (vfTried stamped) is not
+// re-run this process, so one the verifier cannot settle is not retried every
+// heartbeat; a provider-failed session is not stamped and retries next heartbeat.
 func (e *Engine) verifierLoop(ctx context.Context, t *Task) {
 	interval := plannerHeartbeatInterval(t)
 	heartbeat := time.NewTimer(interval)
@@ -1057,15 +1059,14 @@ func (e *Engine) verifierLoop(ctx context.Context, t *Task) {
 		}
 		var todo []*db.Node
 		if len(nodes) > 0 {
-			// Admission first: vfTried must be stamped only once this round is actually
-			// admitted. Stamping during selection would burn the one attempt on a finding
-			// that admission then rejects (paused / deleting / concurrency cap).
+			// Admission first: the round's work below must only run once actually
+			// admitted (paused / deleting / concurrency cap would reject it).
 			if !e.beginTaskOperation(t.ID) {
 				return
 			}
 			defer e.decInflight(t.ID)
 			for _, n := range nodes {
-				if _, seen := e.vfTried.LoadOrStore(n.ID, true); seen {
+				if _, settled := e.vfTried.Load(n.ID); settled {
 					continue
 				}
 				todo = append(todo, n)
@@ -1090,8 +1091,16 @@ func (e *Engine) verifierLoop(ctx context.Context, t *Task) {
 			e.BeginLLMCall(t.ID)
 			err := vf.Verify(ectx, taskIDInt, t.Store, n, t.Goal, guard, emit)
 			e.EndLLMCall(t.ID)
-			if err != nil && ectx.Err() == nil {
-				log.Printf("[verifier] task %s 复核 #%d 出错: %v", t.ID, n.ID, err)
+			if err != nil {
+				// 会话未正常结束（provider 故障 / 中断）：finding 没有被真正「尝试」，
+				// 不盖章 vfTried，下一轮心跳重试。只有会话正常结束（err==nil，无论
+				// 复核结论是 true 还是无法复现）才消耗本进程的唯一尝试名额——避免瞬时限
+				// 流与「确实无法定案」被同等对待（2026-11-11 实测：#10/#11/#12 被烧）。
+				if ectx.Err() == nil {
+					log.Printf("[verifier] task %s 复核 #%d 出错(不消耗尝试名额,下轮重试): %v", t.ID, n.ID, err)
+				}
+			} else {
+				e.vfTried.Store(n.ID, true)
 			}
 			e.touch(t.ID)
 		}
