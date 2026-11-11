@@ -11,6 +11,15 @@
 
 ---
 
+### 2026-11-11 — 已知上游限制：技能清单的 8k 硬编码预算（当前不触发）
+
+- 来源：X 上游讨论（stop_spammerz 指出 agent 框架普遍存在「技能清单硬编码 8k 字符上限」的缺陷）。核查确认 Lodestar vendor 的 norma 同样存在：`third_party/norma/skill/skill.go:95` `maxSkillListingChars = 8000`，单技能描述另有 `maxSkillDescChars = 500` 截断。
+- **语义比上游批评的轻**：预算耗尽后剩余技能**退化为仅列名字（name-only），不会从清单中丢弃**（`skill.go:171` 注释与实现写明 never dropped），模型仍可按名调用。实际损失是 description 这个「何时该用」的发现字段——对名字猜不出用途的技能，发现能力降级。
+- **当前余量充足，不构成活 bug**：实测本仓库 3 个技能（api-recon 19 / playwright-cli 77 / scopesentry 500 截断后）合计约 0.64k 字符，预算 8k，余量约 12 倍。且技能按 agent 可见性分装（`server/assembly.go:36` 每个agent只装载自己的技能），不做全局堆叠。
+- **触发预估**：单 agent 挂载约 15 个满描述长度（500 字符）的技能时清单开始降级。届时修复方向：上限改为环境变量（fork 内可改），或按 agent 做技能分组。当前不动（基于事实、不做投机性修改）。
+
+---
+
 ### 2026-11-11 — 验证者首次实弹验证通过 + 暴露两个待修复问题
 
 - **验证者（stage 7b，`LODESTAR_VERIFIER_ENABLED`）首次真实运行验证通过**。真实渗透任务（本地 OWASP Juice Shop，worker 3 并发 + planner + 验证者，模型 `GLM-5.3-Flash`，任务 1 小时超时）中：worker 产出 6 个 finding（`report_finding`），验证者在 16:40:45 心跳轮起对 #13/#14/#15 独立复核，三条全部 `verified=true` 落库。行为逐项符合设计：心跳驱动（不抢 planner 的 notify 事件）、每轮上限 `verifierBatch=3`、独立会话只读回放 PoC（Bash 全部为 GET/SELECT 类操作；一次 `Write` 是本地回放脚本文件，非目标写操作）、`record_verification` 的 node_id 构造时绑定。
