@@ -353,7 +353,9 @@ func (s *Server) buildVerifierFromEnv(gProv llm.Provider, gCfg agent.Config, tx 
 	if turns <= 0 {
 		turns = verifierMaxTurnsDefault
 	}
-	v := agent.NewVerifier(prov, cfg.Model, s.m.dir, tx, cfg.CompactionWindow(), turns)
+	// 验证者无任务 profile 链，给它包一层与 worker 路径同语义的同 provider 退避重试
+	// （见 server/provider_retry.go）：瞬时 429/5xx 在会话内重试，而不是整轮作废。
+	v := agent.NewVerifier(retryProvider{inner: prov, label: "verifier"}, cfg.Model, s.m.dir, tx, cfg.CompactionWindow(), turns)
 	v.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
 	v.SetNonStreaming(nonStreamingResolver(cfg))
 	v.SetMaxTokens(maxTokensResolver(cfg))
