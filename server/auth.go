@@ -187,6 +187,10 @@ func (s *Server) authChangePassword(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "新密码不能为空")
 		return
 	}
+	if len(req.NewPassword) < 8 {
+		writeErr(w, 400, "新密码长度至少 8 位")
+		return
+	}
 	hash, ok, _ := pg.GetSetting(authPassKey)
 	if !ok || hash == "" {
 		writeErr(w, 403, "密码未初始化，请先设置密码")
@@ -205,6 +209,21 @@ func (s *Server) authChangePassword(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "保存失败: "+err.Error())
 		return
 	}
+
+	// Rotate the signing key so all existing tokens become invalid immediately.
+	newKey := make([]byte, 32)
+	for i := range newKey {
+		n, _ := rand.Int(rand.Reader, big.NewInt(int64(len(keyChars))))
+		newKey[i] = keyChars[n.Int64()]
+	}
+	if s.keyDir != "" {
+		if err := os.WriteFile(filepath.Join(s.keyDir, jwtKeyFilename), newKey, 0600); err != nil {
+			log.Printf("[auth] 密码修改成功，但密钥写盘失败: %v", err)
+		}
+	}
+	s.jwtKey = newKey
+	log.Printf("[auth] 密码修改成功，密钥已轮换，所有会话强制失效")
+
 	writeJSON(w, 200, map[string]any{"ok": true})
 }
 

@@ -16,6 +16,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { api } from "@/lib/api";
+import { auth } from "@/lib/auth";
 
 export function ChangePasswordDialog({
   open,
@@ -44,6 +45,10 @@ export function ChangePasswordDialog({
       toast.error("请填写当前密码和新密码");
       return;
     }
+    if (newPassword.length < 8) {
+      toast.error("新密码长度至少 8 位");
+      return;
+    }
     if (newPassword !== confirmPassword) {
       toast.error("两次输入的新密码不一致");
       return;
@@ -52,8 +57,10 @@ export function ChangePasswordDialog({
     api
       .changePassword(oldPassword, newPassword)
       .then(() => {
-        toast.success("密码已修改");
+        toast.success("密码已修改，请重新登录");
+        auth.clearToken();
         onOpenChange(false);
+        window.location.href = "/login";
       })
       .catch((err) => toast.error(`修改失败：${(err as Error).message}`))
       .finally(() => setSaving(false));
@@ -66,7 +73,7 @@ export function ChangePasswordDialog({
           <DialogHeader>
             <DialogTitle>修改密码</DialogTitle>
             <DialogDescription>
-              用户名固定为 <b>Lodestar</b>。需先输入当前密码验证；修改后已签发的登录 token 仍有效直至过期。
+              用户名固定为 <b>Lodestar</b>。需先输入当前密码验证；修改成功后将自动注销当前会话并重新登录。
             </DialogDescription>
           </DialogHeader>
           <div className="flex flex-col gap-3 py-4">
