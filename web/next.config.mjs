@@ -28,9 +28,9 @@ const nextConfig = {
           images: { unoptimized: true },
         }
       : {
-          // 开发：把 /api/* 反代到 Go 后端（默认 :8787，可用 AUTOPENTEST_API 覆盖）。
+          // 开发：把 /api/* 反代到 Go 后端（默认 :8787，可用 LODESTAR_API 覆盖）。
           async rewrites() {
-            const backend = process.env.AUTOPENTEST_API ?? "http://localhost:8787";
+            const backend = process.env.LODESTAR_API ?? "http://localhost:8787";
             return [{ source: "/api/:path*", destination: `${backend}/api/:path*` }];
           },
         }),

@@ -20,6 +20,14 @@ export const THEME_PRESET_OPTIONS = [
     },
   },
   {
+    label: "Lodestar",
+    value: "lodestar",
+    primary: {
+      light: "oklch(0.495 0.235 274)",
+      dark: "oklch(0.645 0.2 276)",
+    },
+  },
+  {
     label: "Brutalist",
     value: "brutalist",
     primary: {

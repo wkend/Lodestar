@@ -41,11 +41,22 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
       <SidebarHeader>
         <SidebarMenu>
           <SidebarMenuItem>
-            <SidebarMenuButton asChild>
-              <Link prefetch={false} href="/function/tasks">
+            <SidebarMenuButton asChild size="lg">
+              <Link prefetch={false} href="/function/tasks" className="gap-2.5">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src="/logo.png" alt="Lodestar" width={40} height={40} className="shrink-0" />
-                <span className="font-semibold text-base">{APP_CONFIG.name}</span>
+                <img
+                  src="/logo.png"
+                  alt="Lodestar"
+                  width={36}
+                  height={36}
+                  className="shrink-0 drop-shadow-[0_0_8px_rgba(99,102,241,0.45)]"
+                />
+                <div className="flex flex-col gap-0.5 leading-none group-data-[collapsible=icon]:hidden">
+                  <span className="font-semibold text-base tracking-tight">{APP_CONFIG.name}</span>
+                  <span className="font-mono text-[10px] text-sidebar-foreground/60 tracking-widest uppercase">
+                    Polaris Engine
+                  </span>
+                </div>
               </Link>
             </SidebarMenuButton>
           </SidebarMenuItem>

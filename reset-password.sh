@@ -16,7 +16,7 @@
 #   ./reset-password.sh                          # 本地，自动读 config.json/环境，交互输入新密码
 #   ./reset-password.sh -p 'NewPass!'            # 本地，直接给定新密码
 #   ./reset-password.sh --dsn postgres://u:p@h:5432/lodestar
-#   ./reset-password.sh -H 127.0.0.1 -P 5433 -U autopentest -W pass -d lodestar
+#   ./reset-password.sh -H 127.0.0.1 -P 5433 -U lodestar -W pass -d lodestar
 #   ./reset-password.sh -m docker                # docker 部署（读 .env 的 POSTGRES_*）
 #   ./reset-password.sh -m docker -c pg容器名 --exec docker
 #
