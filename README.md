@@ -1,151 +1,204 @@
 # Lodestar
 
-多脑协同的自主渗透测试智能体。用一张可追溯的推理图驱动探索，用独立角色互相校验。
+**基于双图推理架构与多角色协同校验的自主渗透测试系统**
 
-> **仅供授权测试与研究使用。** 未经明确授权，不得对任何系统、网络、应用或数据进行安全测试、利用或访问。使用者自行承担全部法律与合规责任。
+> **合规与免责声明**：本系统仅用于经明确书面授权的安全测试、漏洞验证与学术研究。严禁对任何未获授权的系统、网络、应用或数据发起探测、利用或访问。使用者须自行承担因使用本软件产生的全部法律与合规责任。
 
-个人研究项目。基座来自上游项目，思路借鉴 Cairn，角色划分参考 sapper-v2，来源详见文末的「参考」。
+---
 
-## 它做什么
+## 1. 项目概述
 
-规划者（planner）不断把"下一步做什么"写成意图。执行者（worker）领取意图、执行，再把结论写回图。另外两个独立角色分别提出假设（态势研判者）和复核发现（验证者）。
+**Lodestar** 将单次渗透测试建模为**可追溯、可校验、可中断恢复**的多智能体协作过程。系统以两张持久化图谱为核心状态面：
 
-这样一次渗透可以追溯、可以校验，中断后也能恢复。项目重点不在单个 agent 更聪明，而在角色之间互相检查。
+- **资产图（Asset Graph，全局共享）**：跨任务沉淀目标企业的域名、IP、端口、服务指纹与归属关系，支持 ScopeSentry 资产同步与覆盖度统计。
+- **探索图（Exploration Graph，任务独占）**：有向无环推理图，包含五类闭合节点（`fact`、`intent`、`finding`、`goal`、`hypothesis`）及血缘边（`derived_from`、`proved_by` 等），完整记录每一次探测的依据、偏离与证据链。
 
-## 增量能力
+在此基座之上，Lodestar 引入了**可插拔执行后端（`AgentBackend`）**、**写回准入与偏离审计**、**多脑协同（态势研判者 + 独立验证者）**以及**不可信数据边界与上下文自交接机制**。详细架构设计与不变量定义请参阅 [`ARCHITECTURE.md`](./ARCHITECTURE.md)。
 
-| 能力 | 解决的问题 | 关键实现 |
-|---|---|---|
-| 可换脑的后端 | 借用各厂商完整的 agentic 能力，同时保留进程内的实时能力 | `AgentBackend` 接口、`CLIWorker` 批处理回写、失败时回退到 norma |
-| 可验证的写回 | 图谱被重复或垃圾节点污染 | 意图指纹去重、`AddNode` 统一校验、`deviations` 偏离记录 |
-| 多脑协同 | 单个 brain 容易自欺，也容易漏掉跨线索的关联 | 态势研判者提出假设，验证者复核发现 |
+---
 
-三项能力默认关闭。不配置任何 `LODESTAR_*` 变量时，行为与上游基座一致。
+## 2. 核心架构与技术特性
 
-双图的组织方式、意图的完整生命周期、各角色可用的工具和硬性边界，见 [ARCHITECTURE.md](./ARCHITECTURE.md)。
+### 2.1 四角色多脑协同
 
-## 架构要点
+系统将自主渗透拆分为四个职责隔离、工具集受限的角色，消除单智能体架构常见的“自说自话”与“未经复现即误报”问题：
 
-### 可换脑的后端
+| 角色 | 源码实现 | 核心职责 | 唤醒与调度机制 |
+|---|---|---|---|
+| **规划者（Planner）** | `agent/planner.go` | 读取探索图态势、判定目标达成状态、拆解并派发下一步意图（`intent`） | 事件边沿触发（`notify`）+ 周期心跳兜底（带 60 分钟空转门控 `plannerIdleGate`） |
+| **执行者（Worker）** | `agent/worker.go` / `agent/cli_worker.go` | 认领开放意图、执行探测与验证、通过 `ToolSet` 将事实/资产/漏洞写回双图 | 轮询任务 Frontier（空闲时 800ms 退避），支持多实例并发 |
+| **态势研判者（Hypothesizer）** | `agent/hypothesizer.go` | 横向综合已确认事实，提出跨资产、跨链路的攻击假设（`hypothesis`） | 仅心跳驱动（间隔为规划者的 3 倍），不监听 `notify`，零唤醒竞争 |
+| **独立验证者（Verifier）** | `agent/verifier.go` | 在独立会话中以**只读**方式重放 PoC 关键证据，对 `finding` 节点给出复核结论 | 仅心跳驱动（每轮上限 `verifierBatch = 3`），支持同 Provider 瞬时故障退避重试 |
 
-- `AgentBackend` 接口抽自基座 worker 的 `Execute` 与 `ExecuteWithMessage` 签名。进程内的 `*Worker`（norma）和 `CLIWorker`（子进程加批处理回写）实现同一接口，执行路径与后端无关。
-- `CLIWorker` 的流程：引擎向子进程注入该意图的图上下文，子进程完整运行，壳程序解析尾部的结构化结果，再经现有 `ToolSet` 写回双图。所有写图都走同一条路径，因此校验、血缘和 `notifyFinding` 对两种后端都生效。
-- 当前由 `pickBackend` 做全局开关：配置了 CLI 就全部走 CLI，否则全部走 norma。**按意图分派尚未实现**，需要可靠的意图特征信号，留待后续。
-- 失败回退：CLI 子进程出错（密钥错误、代理故障、5xx、持续的 model_error），且本次运行没有被取消、暂停、kill 或进入收尾，就对同一意图用进程内 norma 重跑一次。仅使用 norma 的部署不会触发此回退。
+**关键校验语义**：
+- **验证者只读与非证伪原则**：验证者仅执行非破坏性验证（如 GET/HEAD 请求、只读查询、检查已落盘证据）。复核结论写入 `payload.verification`（`verified: true | false` 及具体 `issues`），**不修改 `finding` 节点的 `state`**；目标不可达或需写操作而未重放时标记为 `verified=false` 并写明原因，不将“无法复现”等同于“漏洞已证伪”。
+- **假设闭环状态机**：`hypothesis` 节点遵循 `open → confirmed | refuted` 状态流转；规划者消费 `open` 假设并派生验证意图，获得事实证据后通过 `resolve_hypothesis` 定案。
 
-### 可验证的写回
+### 2.2 可插拔执行后端（`AgentBackend`）
 
-- **意图去重（Intent Admission）**：对活跃意图（open/running）计算规范化文本指纹，忽略大小写、空格、标点、语序和重复词，并结合排序后的 `asset_ids`。命中时不新建意图，返回已有意图的 id，且不改动其血缘。规划者的提示词只是软约束，这里做硬拦截，挡住"换个说法就重复"的意图。
-- **`AddNode` 写回校验**：唯一的写入入口。写库前检查 kind 是否属于闭合集合、payload 是否非空。这是给绕过工具直接写图的新写入方预留的最后防线。
-- **`deviations` 字段**：`record_fact` 可选记录执行时偏离原计划的地方，并回传给规划者。规划者看到的是意图实际怎么跑偏的，而不只是结果。
+引擎通过 `agent/backend.go` 定义的 `AgentBackend` 接口驱动执行者，支持两种后端无缝切换与故障回退：
 
-### 多脑协同
+1. **进程内 `norma` 后端（`*Worker`）**：基于内置 `norma` SDK 直接驱动模型工具循环，完整记录 `activity` 轨迹，受 `guard` 与 `intercept` 实时拦截保护。
+2. **外部 CLI 委派后端（`*CLIWorker`）**：将单条意图定向切片注入外部通用智能体 CLI 子进程（如 `claude`、`codex`），子进程完成后解析尾部结构化 JSON 并统一经本进程 `ToolSet` 写回数据库，复用全部血缘校验与触发器。
+3. **自动降级回退**：当启用 `LODESTAR_CLI_ENABLED` 且 CLI 子进程因环境、代理或模型错误失败（且任务未处于取消/暂停/收尾状态）时，引擎自动回退至进程内 `norma` 后端重跑该意图。
 
-| 角色 | 职责 | 唤醒方式 |
-|---|---|---|
-| 规划者 planner | 读态势、判目标、补意图 | 图变即唤醒，另有心跳兜底 |
-| 执行者 worker | 领一条意图、执行、写回 | 轮询 frontier，无活时 800ms 退避 |
-| **态势研判者 hypothesizer** | 横向综合已确认事实，提出跨资产、跨链路的**假设** | 仅心跳（规划者间隔的 3 倍），不抢图变事件 |
-| **验证者 verifier** | 在独立会话中只读地重放 PoC，复核发现 | 仅心跳 |
+### 2.3 写回准入、上下文交接与安全边界
 
-- **第二个 brain（态势研判者）**：产出 `hypothesis` 节点，状态流转为 `open → confirmed | refuted`。规划者消费 open 假设并派出验证意图，事实产出后用 `resolve_hypothesis` 定案。它去掉了规划者专属的机制（todolist、kill、steer、目标判定），只读，外加 `record_hypothesis`，且从不接入 notify，因此不会与规划者争抢唤醒。
-- **验证者**：`report_finding` 原先完全依赖 worker 自述结论，而 worker 最容易把版本号或 CVE 命中当成漏洞。验证者在独立会话中只读地重放 PoC 的非破坏部分，结论写回 finding 节点。
-  - 无法复现不等于已证伪。目标不可达时记为 `verified=false`，并注明"目标不可达，待复测"。
-  - 结论只写入 `payload.verification`，不改 `state`。复核失败是给运营者的证据，不会自动关闭一个可能真实的漏洞。
-  - 未复核（nil）与复核未通过（`verified=false`）在界面和 API 上严格区分。
+- **意图去重（Intent Admission，`agent/tools.go`）**：对处于 `open`/`running` 状态的活跃意图计算规范化文本指纹（忽略大小写、空白、标点、词序与重复词）并结合排序后的 `asset_ids`。命中重复时直接返回已有意图 ID，从工具层硬性拦截重复派单。
+- **节点写入强校验（`db/exploration.go` `AddNode`）**：所有图节点入库前强制校验 `kind` 属于合法闭合集合且 `payload` 非空。
+- **执行偏离记录（`deviations`）**：`record_fact` 支持记录 `{planned, actual, reason}` 偏离项并透出至规划者视图（`recent_facts`），使规划者能够感知执行过程与原计划的实际偏差。
+- **不可信数据提示注入边界（`agent/untrusted.go`）**：在规划者、执行者、研判者与验证者提示词中强制挂载不可经数据库编辑移除的边界声明，明确目标响应与图谱内容均为待分析数据而非指令。
+- **上下文压缩前自我交接（`agent/handover.go`）**：在模型上下文占用达到压缩阈值的 85% 时注入交接指令，促使智能体将已确认结论、未完事项与死路写入探索图；压缩完成后检测到输入 Token 骤降（低于前次 60%）时自动提示先检索交接事实再继续执行。
 
-### 安全边界
+---
 
-- **提示注入边界**：探索图是共享写面。worker 会把目标的 HTTP 响应、banner、页面里的"管理员留言"写进 fact，下一轮规划者又把这些 fact 注入自己的提示，形成一条从目标直达编排器的注入通道。为此新增一段由代码持有、不可编辑的提示段，声明图谱内容和目标输出都是数据，不是指令，并给出处置动作。改数据库里的提示词正文无法删除它。
-- **验证者只读**：验证者不做写入、删除或修改口令之类的操作。
+## 3. 环境要求与快速开始
 
-## 配置开关
+### 3.1 基础依赖
 
-全部默认关闭。不配置时，行为与上游基座一致。
+- **Go**：`1.26.3` 或更高版本（见 `go.mod`）
+- **Node.js**：`20+`（用于构建或运行 `web/` 目录下的 Next.js 16 前端）
+- **PostgreSQL**：`16+`（核心存储：探索图、资产图、活动轨迹、LLM 记录与系统设置）
 
-| 环境变量 | 默认 | 作用 |
-|---|---|---|
-| `LODESTAR_CLI_ENABLED` | 关 | 用 CLI 子进程作 worker 后端，否则全走 norma |
-| `LODESTAR_CLI_COMMAND` | — | CLI 可执行文件，如 `claude` |
-| `LODESTAR_CLI_ARGS` | — | 参数模板，逗号分隔。用字面量 `{{PROMPT}}` 传提示词，否则走 stdin |
-| `LODESTAR_CLI_ENV` | — | 传给子进程的额外环境变量 |
-| `LODESTAR_BRAIN2_ENABLED` | 关 | 启用态势研判者（第二个 brain） |
-| `LODESTAR_BRAIN2_MODEL` | 继承 planner | 覆盖第二个 brain 的模型 |
-| `LODESTAR_VERIFIER_ENABLED` | 关 | 启用发现复核 |
-| `LODESTAR_VERIFIER_MODEL` | 继承全局 | 覆盖验证者的模型 |
+### 3.2 数据库与配置初始化
 
-## 快速开始
-
-环境要求：
-
-- Go，版本见 `go.mod`（当前为 1.26.3）
-- Node.js，用于运行前端（Next.js 16）
-
-开发模式，后端、流量代理和前端一起启动：
+PostgreSQL 连接信息按以下优先级解析：**环境变量 `LODESTAR_PG_DSN` > 配置文件 `config.json`**。
 
 ```bash
-cd web && npm install && cd ..   # 首次运行需要安装前端依赖
-./dev.sh                         # 后端 :8787，流量代理 :8788，前端 :5173
+# 方式 A：通过环境变量指定数据库连接
+export LODESTAR_PG_DSN="postgres://lodestar:yourpass@127.0.0.1:5433/lodestar?sslmode=disable"
+
+# 方式 B：复制配置模板并填写 database 字段
+cp config.example.json config.json
 ```
 
-打开 **http://localhost:5173**。`dev.sh` 启动的后端不内嵌前端，直接访问 `:8787` 根路径会返回 404，这是正常现象。
+### 3.3 启动运行
 
-首次进入 `/setup` 设置管理员密码。
-
-编译单二进制（前端内嵌）运行 `./build.sh`。它先构建前端，再以 `-tags embedui` 编译 `./cmd/lodestar`。
-
-启动参数：
-
-| 参数 | 默认 | 作用 |
-|---|---|---|
-| `-addr` | `:8787` | HTTP 监听地址 |
-| `-proxy` | `:8788` | 流量录制代理地址，留空则关闭 |
-| `-data` | 可执行文件旁的 `data/` | SQLite 数据目录 |
-
-测试的最小验证命令：
+#### 方式一：源码开发模式（前后端分离热更新）
 
 ```bash
-go build ./...
-go test ./server -run TestPlannerIdleGate -count=1
+# 1. 首次运行需安装前端依赖
+cd web && npm install && cd ..
+
+# 2. 同时启动 Go 后端(:8787)、流量录制代理(:8788) 与 Next.js 前端(:5173)
+./dev.sh
 ```
 
-## 已知限制
+启动后访问 **`http://localhost:5173`**（开发模式下前端通过 `/api/*` 自动反代至 `:8787`；直接访问 `:8787` 根路径返回 `404` 属正常现象）。首次访问将自动跳转至 `/setup` 初始化管理员密码（固定管理员账户名为 `Lodestar`）。
 
-- **按意图分派后端未实现。** 目前是全局开关，要么全部走 CLI，要么全部走 norma。
-- **CLI 后端的可见性不完整。** 子进程内部的步骤不写入 activity，`search_all_worker_traces` 看不到这些步骤。子进程自带的 Bash 也不受 guard 和 intercept 拦截。这些限制只适用于授权实验室场景。
-- **输入 token 计数问题已修复并经线上验证。** 智谱等 Anthropic 兼容端点把真实的 input 放在 `message_delta` 中，norma 原先只从 `message_start` 计数，导致 input 为 0。修复见提交 `432af24`。2026-11-11 实测任务（Task 1「空转门控实测」）的 `usage`/`result` 行中 `input_tokens`（4211、11703）与 `cache_read_tokens`（576）均正常非零落库。根因和修复记录见 [`CHANGELOG.LODESTAR.md`](./CHANGELOG.LODESTAR.md)。
-- **空转门控已端到端验证。** 心跳在图无变化时不规划，等满两个窗口（60 分钟）才规划一次。2026-11-11 实测：连续两个周期内，10 分钟心跳全部被门控跳过（零 LLM 调用），规划严格在距上轮结束 60 分钟（60m 01s）时触发，且触发后计数器正确重置。
+#### 方式二：编译单二进制生产包（内嵌静态前端）
 
-## 仓库结构
+```bash
+./build.sh
+./dist/lodestar-$(go env GOOS)-$(go env GOARCH)/lodestar -addr :8787 -proxy :8788
+```
 
-| 路径 | 内容 |
+`build.sh` 会先执行 `web/` 静态导出，再以 `-tags embedui` 编译单二进制文件。启动后直接访问 **`http://localhost:8787`**。
+
+#### 方式三：Docker Compose 部署
+
+```bash
+cp .env.example .env   # 编辑 .env 设置 POSTGRES_PASSWORD 与模型密钥
+docker compose up -d
+```
+
+---
+
+## 4. 配置参数与环境变量
+
+### 4.1 命令行启动参数（`cmd/lodestar`）
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `-addr` | `:8787` | 后端 HTTP API（及内嵌前端）监听地址 |
+| `-proxy` | `:8788` | HTTP/HTTPS 流量录制 MITM 代理监听地址（传空字符串则禁用） |
+| `-data` | `<BaseDir>/data` | 运行时文件数据目录（任务工作区、会话 Transcript、归档包等） |
+
+### 4.2 环境变量一览
+
+#### 基础与模型配置
+
+| 环境变量 | 默认值 | 说明 |
+|---|---|---|
+| `LODESTAR_PG_DSN` | — | PostgreSQL 完整连接串（最高优先级，覆盖 `config.json`） |
+| `LODESTAR_CONFIG` | `./config.json` | 显式指定配置文件路径 |
+| `LODESTAR_SKILL_DIR` | `./skills` | 显式指定技能目录（覆盖 `config.json` 的 `skill_dir`） |
+| `LODESTAR_LLM_PROVIDER` | 自动推断 | 全局默认模型供应商：`anthropic` 或 `openai`（Web UI 已配置默认 Profile 时以数据库为准） |
+| `LODESTAR_LLM_MODEL` | 依供应商而定 | 全局默认模型 ID |
+| `LODESTAR_LLM_BASE_URL` | 官方端点 | 模型 API 基础 URL（支持兼容端点） |
+| `LODESTAR_LLM_PROXY` | — | 模型 API 请求代理（支持 `http`/`https`/`socks5`） |
+| `LODESTAR_LLM_STREAM` | `true` | 是否默认启用流式响应（设为 `false`/`0`/`off` 走非流式） |
+| `ANTHROPIC_API_KEY` | — | Anthropic 格式 API 密钥 |
+| `OPENAI_API_KEY` | — | OpenAI 格式 API 密钥 |
+
+#### Lodestar 多脑协同与换脑开关（默认全部关闭）
+
+| 环境变量 | 默认值 | 说明 |
+|---|---|---|
+| `LODESTAR_CLI_ENABLED` | `false` | 启用外部 CLI 子进程作为主执行者后端（失败自动回退进程内 `norma`） |
+| `LODESTAR_CLI_COMMAND` | — | 外部 CLI 可执行文件名或路径（例如 `claude`、`codex`） |
+| `LODESTAR_CLI_ARGS` | — | 传给 CLI 的参数模板（逗号分隔；含 `{{PROMPT}}` 时替换提示词，否则经 `stdin` 传入） |
+| `LODESTAR_CLI_ENV` | — | 附加给 CLI 子进程的环境变量列表（逗号分隔 `KEY=VALUE`） |
+| `LODESTAR_BRAIN2_ENABLED` | `false` | 启用态势研判者（Hypothesizer / 第二 Brain） |
+| `LODESTAR_BRAIN2_MODEL` | 继承规划者 | 覆盖态势研判者使用的模型 ID |
+| `LODESTAR_VERIFIER_ENABLED` | `false` | 启用发现独立验证者（Verifier） |
+| `LODESTAR_VERIFIER_MODEL` | 继承全局配置 | 覆盖独立验证者使用的模型 ID |
+
+---
+
+## 5. 仓库目录结构
+
+| 路径 | 说明 |
 |---|---|
-| `cmd/lodestar` | 程序入口 |
-| `server/` | HTTP 接口、引擎、规划者与执行者循环 |
-| `db/` | 探索图、资产图与 activity 的存储 |
-| `llmrec/`、`llmpool/` | LLM 调用记录与连接池 |
-| `third_party/norma` | norma SDK 的本地 fork，`go.mod` 用 `replace` 指向这里 |
-| `web/` | Next.js 前端 |
-| `ARCHITECTURE.md` | 架构与边界说明 |
+| `cmd/lodestar/` | 主程序入口、命令行参数解析与启动生命周期管理 |
+| `server/` | HTTP API 路由、自主编排引擎（`engine.go`）、心跳空转门控（`planner_idle.go`）、同源退避重试（`provider_retry.go`）及鉴权管理 |
+| `agent/` | 四类智能体实现（Planner / Worker / CLIWorker / Hypothesizer / Verifier）、工具集定义（`tools.go`）、不可信数据边界与上下文自交接（`handover.go`） |
+| `db/` | PostgreSQL 存储层：探索图、资产图、任务范围、活动记录、漏洞发现与数据库迁移 |
+| `guard/`、`intercept/` | 命令安全守卫（Hook 拦截）与高危操作人工审批门 |
+| `traffic/` | 内置 MITM 流量录制代理与请求检索 |
+| `llmpool/`、`llmrec/` | 多模型配置池、速率限制、故障转移与 LLM 原始报文录制 |
+| `mcphttp/`、`skills/` | MCP 客户端适配与内置技能包（`SKILL.md`） |
+| `report/`、`enrich/` | 漏洞报告生成与资产指纹富化 |
+| `third_party/norma/` | 进程内 Agent SDK `norma` 的本地维护分支（经 `go.mod` `replace` 绑定） |
+| `web/` | Next.js 16 + Tailwind CSS v4 前端控制台 |
+| `ARCHITECTURE.md` | 双图结构、意图状态机、角色工具矩阵与硬性安全边界规范 |
+| `CHANGELOG.LODESTAR.md` | Lodestar 各阶段架构演进、实弹验证记录与已知问题台账 |
 
-## 变更日志
+---
 
-- [`CHANGELOG.LODESTAR.md`](./CHANGELOG.LODESTAR.md)：本项目的增量改造（阶段 1 至 7）
+## 6. 构建与测试验证
 
-## 许可
+```bash
+# 全量编译检查
+go build ./...
 
-- 依赖 [norma](https://github.com/Autumn-27/norma) SDK。本地使用的是 `third_party/norma` 中的 fork，`go.mod` 用 `replace` 指向这里。
-- 仓库根目录没有 LICENSE 文件。`web/LICENSE` 是 MIT 许可（Copyright (c) 2024 Mohammed Arham Khan），只适用于 `web/` 目录。其余部分的许可状况不明确，再分发或商用前需要先确认授权。
+# 静态分析与核心包单元测试
+go vet ./server ./agent ./db ./cmd/lodestar
+go test ./server ./agent ./cmd/lodestar -count=1
+```
 
-## 参考
+---
 
-本项目参考或基于以下项目。
+## 7. 已知限制与边界
 
-| 项目 | 在本项目中的作用 | 链接 |
+1. **按意图粒度分派后端尚未实现**：当前 `pickBackend` 为全局开关（启用 `LODESTAR_CLI_ENABLED` 后所有意图均优先走 CLI 后端，失败回退 `norma`），尚未根据意图特征动态路由。
+2. **CLI 后端的过程可见性与拦截边界**：外部 CLI 子进程的内部推理步骤不逐条写入 `activity` 表（`search_all_worker_traces` 仅对进程内 `norma` 轨迹生效），且子进程内部自带的 Shell 工具不受本进程 `guard`/`intercept` Hook 拦截，仅适用于受控授权靶场环境。
+3. **技能清单长度上限**：`third_party/norma/skill/skill.go` 对单次注入的技能清单设有 `maxSkillListingChars = 8000` 字符预算（超出后降级为仅保留技能名称 `name-only`，不会丢弃技能）。当前内置技能仅占约 0.64k 字符，余量充足。
+
+---
+
+## 8. 许可说明与参考致谢
+
+### 许可说明
+
+- `web/` 前端目录源自开源模板的部分遵循 [`web/LICENSE`](./web/LICENSE)（MIT License）。
+- 仓库其余部分包含源自上游基座的代码与本项目的增量改造；因上游基座与 `norma` SDK 原始发布时未附带开源许可证文件，本仓库仅作为个人安全研究与技术验证使用。任何公开再分发或商业使用前，须自行确认并取得相关权利人授权。
+
+### 参考与致谢
+
+| 项目 | 关系与贡献说明 | 链接 |
 |---|---|---|
-| ARTEX（上游基座） | 项目骨架：双图架构（资产图全局共享、探索图每个任务独占）、事件驱动引擎、进程内 norma harness、Web UI、流量录制、审批门。本项目 vendor 了其源码，module path 原为 `github.com/Autumn-27/artex`，现已改为 `github.com/wkend/lodestar`。 | 原仓库 `github.com/Autumn-27/ARTEX` 已不可访问 |
-| Cairn | 把通用 agent CLI 当 worker 使用的可换脑思路，以及批处理式的结论回写 | [oritera/Cairn](https://github.com/oritera/Cairn) |
-| sapper-v2 | 独立复核者角色，以及提示词中的不可信数据边界、执行偏离记录 | [N1nEmAn/sapper-v2](https://github.com/N1nEmAn/sapper-v2) |
-| norma | 进程内的 agent SDK，本项目的执行后端 | [Autumn-27/norma](https://github.com/Autumn-27/norma) |
-
-上游 ARTEX 的许可状况不明确（见上文「许可」）。
+| **ARTEX** | **上游基座**：提供双图架构（资产图 + 探索图）、事件驱动引擎、进程内 `norma` Harness、流量录制代理与 Web 控制台基础框架。本项目在其源码基础上进行重命名与多脑协同架构演进。 | 原仓库 `github.com/Autumn-27/ARTEX`（已下线） |
+| **Cairn** | **架构思想参考**：借鉴其将通用 Agent CLI 作为可替换执行后端（`AgentBackend`）及批处理结构化回写的思路（未复制其代码）。 | [oritera/Cairn](https://github.com/oritera/Cairn) |
+| **sapper-v2** | **角色与纪律参考**：借鉴其独立复核者（Verifier）角色划分、不可信数据边界声明及执行偏离记录（`deviations`）设计（MIT 许可，按本项目架构重写）。 | [N1nEmAn/sapper-v2](https://github.com/N1nEmAn/sapper-v2) |
+| **norma** | **进程内 Agent SDK**：提供模型流式调用、工具调度、上下文压缩与 Transcript 记录基础能力（仓库内维护于 `third_party/norma`）。 | [Autumn-27/norma](https://github.com/Autumn-27/norma) |
