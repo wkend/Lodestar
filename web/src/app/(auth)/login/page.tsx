@@ -4,11 +4,42 @@ import { useEffect, useState } from "react";
 
 import { useRouter } from "next/navigation";
 
+import { ArrowRight } from "lucide-react";
+
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { api } from "@/lib/api";
 import { auth } from "@/lib/auth";
+
+// Deterministic starfield coordinates so SSR and client hydration match.
+const STARS = [
+  { cx: 88, cy: 72, r: 1.4, o: 0.7 },
+  { cx: 195, cy: 162, r: 1.0, o: 0.45 },
+  { cx: 310, cy: 64, r: 1.5, o: 0.75 },
+  { cx: 740, cy: 82, r: 1.3, o: 0.65 },
+  { cx: 885, cy: 145, r: 1.1, o: 0.5 },
+  { cx: 1035, cy: 68, r: 1.6, o: 0.75 },
+  { cx: 1185, cy: 138, r: 1.1, o: 0.45 },
+  { cx: 1360, cy: 84, r: 1.5, o: 0.7 },
+  { cx: 1520, cy: 152, r: 1.0, o: 0.4 },
+  { cx: 1675, cy: 76, r: 1.6, o: 0.75 },
+  { cx: 1825, cy: 135, r: 1.2, o: 0.5 },
+  { cx: 72, cy: 295, r: 1.1, o: 0.45 },
+  { cx: 168, cy: 420, r: 1.0, o: 0.35 },
+  { cx: 690, cy: 290, r: 1.2, o: 0.5 },
+  { cx: 840, cy: 360, r: 1.0, o: 0.35 },
+  { cx: 1010, cy: 265, r: 1.3, o: 0.5 },
+  { cx: 1290, cy: 255, r: 1.1, o: 0.4 },
+  { cx: 1790, cy: 285, r: 1.3, o: 0.5 },
+  // Ursa Minor (Little Dipper) curving from upper-left into Polaris at (520, 142)
+  { cx: 235, cy: 238, r: 2.1, o: 0.85 },
+  { cx: 276, cy: 274, r: 1.8, o: 0.7 },
+  { cx: 328, cy: 248, r: 1.9, o: 0.75 },
+  { cx: 292, cy: 214, r: 1.8, o: 0.7 },
+  { cx: 368, cy: 190, r: 2.0, o: 0.8 },
+  { cx: 442, cy: 162, r: 2.1, o: 0.85 },
+] as const;
 
 export default function LoginPage() {
   const router = useRouter();
@@ -18,12 +49,12 @@ export default function LoginPage() {
   const [checking, setChecking] = useState(true);
 
   useEffect(() => {
-    // 已登录直接进主界面（静态导出下无 middleware 代劳这层跳转）。
     if (auth.getToken()) {
       router.replace("/function/tasks");
       return;
     }
-    api.authStatus()
+    api
+      .authStatus()
       .then(({ initialized }) => {
         if (!initialized) router.replace("/setup");
       })
@@ -49,85 +80,296 @@ export default function LoginPage() {
   if (checking) return null;
 
   return (
-    <div className="flex h-dvh">
-      {/* Left panel: Lodestar celestial navigation theme */}
-      <div
-        className="relative hidden flex-col items-center justify-between overflow-hidden p-12 text-center text-white lg:flex lg:w-2/5"
-        style={{
-          background:
-            "radial-gradient(circle at 50% 38%, rgba(99, 102, 241, 0.32) 0%, rgba(79, 70, 229, 0.14) 38%, transparent 70%), linear-gradient(160deg, #0b0e1e 0%, #151934 52%, #1d1842 100%)",
-        }}
+    <div className="relative flex min-h-dvh w-full flex-col justify-between overflow-hidden bg-[#04060e] px-6 py-6 select-none sm:px-10 lg:px-16">
+      {/* Full-viewport celestial night sky, off-center Polaris & winding mountain trail */}
+      <svg
+        viewBox="0 0 1920 1080"
+        preserveAspectRatio="xMidYMid slice"
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-0 h-full w-full"
       >
-        {/* Starfield & celestial grid */}
-        <div
-          className="pointer-events-none absolute inset-0 opacity-25"
-          style={{
-            backgroundImage:
-              "radial-gradient(rgba(255,255,255,0.75) 1px, transparent 1px), radial-gradient(rgba(165,180,252,0.5) 1px, transparent 1px)",
-            backgroundSize: "48px 48px, 96px 96px",
-            backgroundPosition: "0 0, 24px 24px",
-          }}
-        />
-        <div className="relative z-10 flex items-center gap-2 self-start text-indigo-200/80 text-xs tracking-widest uppercase">
-          <span className="inline-block size-2 rounded-full bg-indigo-400 shadow-[0_0_8px_#818cf8]" />
-          Celestial Navigation · Multi-Brain Security Engine
-        </div>
+        <defs>
+          <linearGradient id="skyGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+            <stop offset="0%" stopColor="#03050c" />
+            <stop offset="50%" stopColor="#080d20" />
+            <stop offset="78%" stopColor="#121a3a" />
+            <stop offset="100%" stopColor="#1b1947" />
+          </linearGradient>
 
-        {/* Astrolabe compass & Polaris centerpiece */}
-        <div className="relative z-10 flex items-center justify-center my-auto">
-          <div className="absolute size-96 rounded-full border border-indigo-400/10" />
-          <div className="absolute size-72 rounded-full border border-dashed border-indigo-300/20" />
-          <div className="absolute size-52 rounded-full border border-indigo-300/25 bg-indigo-950/30 backdrop-blur-xs" />
-          <div className="absolute h-80 w-px bg-linear-to-b from-transparent via-indigo-400/25 to-transparent" />
-          <div className="absolute h-px w-80 bg-linear-to-r from-transparent via-indigo-400/25 to-transparent" />
+          {/* Off-center Polaris radial aura at (520, 142) */}
+          <radialGradient id="polarisAura" cx="27.1%" cy="13.1%" r="38%">
+            <stop offset="0%" stopColor="#e0e7ff" stopOpacity="0.55" />
+            <stop offset="18%" stopColor="#818cf8" stopOpacity="0.22" />
+            <stop offset="50%" stopColor="#4f46e5" stopOpacity="0.06" />
+            <stop offset="100%" stopColor="#04060e" stopOpacity="0" />
+          </radialGradient>
+
+          {/* Diagonal guiding beam from Polaris (520,142) toward the mountain pass & wayfarer */}
+          <linearGradient id="guidingBeam" x1="27%" y1="13%" x2="40%" y2="78%">
+            <stop offset="0%" stopColor="#e0e7ff" stopOpacity="0.42" />
+            <stop offset="32%" stopColor="#818cf8" stopOpacity="0.14" />
+            <stop offset="75%" stopColor="#6366f1" stopOpacity="0.04" />
+            <stop offset="100%" stopColor="#6366f1" stopOpacity="0" />
+          </linearGradient>
+
+          {/* Distant pass atmospheric glow around (520, 725) */}
+          <radialGradient id="passGlow" cx="28%" cy="68%" r="36%">
+            <stop offset="0%" stopColor="#818cf8" stopOpacity="0.36" />
+            <stop offset="45%" stopColor="#4f46e5" stopOpacity="0.11" />
+            <stop offset="100%" stopColor="#04060e" stopOpacity="0" />
+          </radialGradient>
+
+          {/* Winding trail shimmer gradient (from distant pass down to foreground) */}
+          <linearGradient id="trailFill" x1="0%" y1="0%" x2="0%" y2="100%">
+            <stop offset="0%" stopColor="#e0e7ff" stopOpacity="0.65" />
+            <stop offset="35%" stopColor="#a5b4fc" stopOpacity="0.32" />
+            <stop offset="72%" stopColor="#6366f1" stopOpacity="0.16" />
+            <stop offset="100%" stopColor="#312e81" stopOpacity="0.05" />
+          </linearGradient>
+        </defs>
+
+        {/* Sky & ambient glows */}
+        <rect width="1920" height="1080" fill="url(#skyGrad)" />
+        <rect width="1920" height="1080" fill="url(#polarisAura)" />
+        <rect width="1920" height="1080" fill="url(#passGlow)" />
+
+        {/* Circumpolar star-trail rings centered on Polaris (520, 142) */}
+        <circle
+          cx="520"
+          cy="142"
+          r="175"
+          fill="none"
+          stroke="#a5b4fc"
+          strokeOpacity="0.1"
+          strokeWidth="1"
+          strokeDasharray="6 14"
+        />
+        <circle
+          cx="520"
+          cy="142"
+          r="325"
+          fill="none"
+          stroke="#818cf8"
+          strokeOpacity="0.07"
+          strokeWidth="1"
+          strokeDasharray="12 22"
+        />
+        <circle cx="520" cy="142" r="495" fill="none" stroke="#6366f1" strokeOpacity="0.045" strokeWidth="1" />
+
+        {/* Ursa Minor constellation lines leading to Polaris (520, 142) */}
+        <polyline
+          points="235,238 276,274 328,248 292,214 235,238"
+          fill="none"
+          stroke="#818cf8"
+          strokeOpacity="0.28"
+          strokeWidth="1.1"
+        />
+        <polyline
+          points="292,214 368,190 442,162 520,142"
+          fill="none"
+          stroke="#c7d2fe"
+          strokeOpacity="0.38"
+          strokeWidth="1.2"
+          strokeDasharray="3 4"
+        />
+
+        {/* Starfield */}
+        {STARS.map((s, idx) => (
+          <circle key={idx} cx={s.cx} cy={s.cy} r={s.r} fill="#e0e7ff" fillOpacity={s.o} />
+        ))}
+
+        {/* Diagonal guiding light cone from Polaris (520,142) illuminating the distant pass & wayfarer */}
+        <polygon points="520,142 360,760 880,820" fill="url(#guidingBeam)" />
+        {/* Sightline from wayfarer (768, 766) straight up to Polaris (520, 142) */}
+        <line
+          x1="520"
+          y1="142"
+          x2="768"
+          y2="766"
+          stroke="#e0e7ff"
+          strokeOpacity="0.28"
+          strokeWidth="1.1"
+          strokeDasharray="4 8"
+        />
+
+        {/* Polaris — The North Star in the upper-left sky (completely unobstructed) */}
+        <g transform="translate(520, 142)">
+          <circle r="48" fill="#818cf8" fillOpacity="0.2" />
+          <circle r="20" fill="#c7d2fe" fillOpacity="0.38" />
+          <path
+            d="M 0,-72 L 4.2,-8 L 72,0 L 4.2,8 L 0,72 L -4.2,8 L -72,0 L -4.2,-8 Z"
+            fill="#ffffff"
+            fillOpacity="0.96"
+          />
+          <path
+            d="M -28,-28 L -2.8,-4.5 L 28,-28 L 4.5,-2.8 L 28,28 L 2.8,4.5 L -28,28 L -4.5,2.8 Z"
+            fill="#a5b4fc"
+            fillOpacity="0.82"
+          />
+          <circle r="5.5" fill="#ffffff" />
+        </g>
+
+        {/* Distant mountain range with a notch/pass at (520, 722) */}
+        <path
+          d="M 0,790 L 165,710 L 355,755 L 465,695 L 520,722 L 585,688 L 790,750 L 1030,695 L 1290,765 L 1560,715 L 1770,760 L 1920,735 L 1920,1080 L 0,1080 Z"
+          fill="#0c1229"
+        />
+
+        {/* Midground overlapping ridges creating valley depth */}
+        <path
+          d="M 0,845 L 220,785 L 440,810 L 635,768 L 860,805 L 1140,775 L 1430,830 L 1710,795 L 1920,835 L 1920,1080 L 0,1080 Z"
+          fill="#080c1d"
+        />
+
+        {/* Foreground dark slopes flanking the winding trail */}
+        <path
+          d="M 0,900 Q 260,855 520,885 T 1060,915 Q 1480,880 1920,930 L 1920,1080 L 0,1080 Z"
+          fill="#04060e"
+        />
+
+        {/* Winding S-curve mountain trail:
+            Starts narrow at the distant pass (520,722),
+            bends left to (430,785),
+            sweeps across to the wayfarer's ridge at (765,830),
+            curves left around a dark bluff at (555,945),
+            and widens into the bottom-center foreground (940,1080). */}
+        <path
+          d="M 520,722
+             C 425,758 415,792 545,812
+             C 695,834 785,822 752,858
+             C 712,898 520,918 558,965
+             C 595,1012 790,1042 860,1080
+             L 1035,1080
+             C 915,1032 665,1000 622,956
+             C 582,914 778,895 802,850
+             C 824,808 712,820 562,800
+             C 442,782 445,754 526,722 Z"
+          fill="url(#trailFill)"
+        />
+
+        {/* Luminous left & right edge highlights of the winding path */}
+        <path
+          d="M 520,722
+             C 425,758 415,792 545,812
+             C 695,834 785,822 752,858
+             C 712,898 520,918 558,965
+             C 595,1012 790,1042 860,1080"
+          fill="none"
+          stroke="#c7d2fe"
+          strokeOpacity="0.5"
+          strokeWidth="1.6"
+        />
+        <path
+          d="M 526,722
+             C 445,754 442,782 562,800
+             C 712,820 824,808 802,850
+             C 778,895 582,914 622,956
+             C 665,1000 915,1032 1035,1080"
+          fill="none"
+          stroke="#818cf8"
+          strokeOpacity="0.32"
+          strokeWidth="1.2"
+        />
+
+        {/* Wayfarer standing at the mid-ridge turn (768, 818), looking up-left toward Polaris */}
+        <g transform="translate(768, 818)">
+          {/* Lantern ground halo */}
+          <ellipse cx="0" cy="26" rx="26" ry="4.5" fill="#a5b4fc" fillOpacity="0.42" />
+          {/* Head tilted slightly left toward Polaris */}
+          <circle cx="-2" cy="-22" r="5.2" fill="#070a18" stroke="#c7d2fe" strokeOpacity="0.8" strokeWidth="1.2" />
+          {/* Cloak flowing slightly right in the mountain wind */}
+          <path
+            d="M -6,-15 L 5,-15 L 14,10 L 10,26 L -9,26 L -11,8 Z"
+            fill="#060916"
+            stroke="#a5b4fc"
+            strokeOpacity="0.6"
+            strokeWidth="1.2"
+          />
+          {/* Left arm raised holding the guiding staff toward Polaris */}
+          <line x1="-5" y1="-12" x2="-15" y2="-21" stroke="#c7d2fe" strokeOpacity="0.75" strokeWidth="2" />
+          <line x1="-16" y1="-30" x2="-11" y2="26" stroke="#c7d2fe" strokeOpacity="0.8" strokeWidth="1.5" />
+          <circle cx="-16" cy="-31" r="6.5" fill="#818cf8" fillOpacity="0.4" />
+          <circle cx="-16" cy="-31" r="2.8" fill="#ffffff" />
+        </g>
+      </svg>
+
+      {/* Top minimal brand mark */}
+      <div className="relative z-10 flex items-center justify-between">
+        <div className="flex items-center gap-2.5">
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
             src="/logo.png"
             alt="Lodestar"
-            width={156}
-            height={156}
-            className="relative drop-shadow-[0_0_28px_rgba(129,140,248,0.55)]"
+            width={28}
+            height={28}
+            className="drop-shadow-[0_0_12px_rgba(129,140,248,0.65)]"
           />
+          <span className="font-mono text-indigo-100/80 text-xs tracking-[0.28em]">LODESTAR</span>
         </div>
-
-        <div className="relative z-10 max-w-sm space-y-2">
-          <div className="font-semibold text-lg tracking-wide text-white">LODESTAR</div>
-          <p className="text-indigo-200/70 text-xs leading-relaxed">
-            以可追溯推理图为星图 · 多脑协同规划、执行、研判与独立复核
-          </p>
-        </div>
+        <span className="hidden font-mono text-[11px] text-indigo-200/45 tracking-widest sm:inline">
+          α URSAE MINORIS · N 90°00′
+        </span>
       </div>
 
-      {/* Right panel */}
-      <div className="flex w-full items-center justify-center bg-background p-8 lg:w-3/5">
-        <div className="w-full max-w-md space-y-10 py-24 lg:py-32">
-          <div className="space-y-4 text-center">
-            <h2 className="text-2xl font-medium tracking-tight">登录</h2>
-            <p className="mx-auto max-w-xl text-muted-foreground">欢迎回来，请输入密码以继续使用 Lodestar</p>
+      {/* Right-aligned floating glass login card — leaves Polaris, light beam & winding trail completely unobstructed */}
+      <div className="relative z-10 my-auto flex w-full justify-center lg:justify-end lg:pr-[4vw] xl:pr-[7vw]">
+        <div className="w-full max-w-[clamp(340px,26vw,390px)] rounded-2xl border border-indigo-200/[0.14] bg-[#0a0f22]/65 p-7 shadow-[0_24px_64px_-12px_rgba(0,0,0,0.82),0_0_36px_-8px_rgba(99,102,241,0.22)] backdrop-blur-md sm:p-8">
+          <div className="flex flex-col">
+            <h1 className="font-semibold text-xl tracking-[0.2em] text-white">LODESTAR</h1>
+            <p className="mt-1.5 text-indigo-200/65 text-xs tracking-wider">前路曲折 · 唯北极星锚定方向</p>
           </div>
-          <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+
+          <form onSubmit={handleSubmit} className="mt-6 flex flex-col gap-4">
             <div className="space-y-1.5">
-              <Label htmlFor="username">用户名</Label>
-              <Input id="username" value="Lodestar" readOnly className="bg-muted text-muted-foreground" />
+              <Label htmlFor="username" className="font-medium text-indigo-100/75 text-xs">
+                用户名
+              </Label>
+              <Input
+                id="username"
+                value="Lodestar"
+                readOnly
+                className="h-10 border-white/10 bg-white/[0.04] font-mono text-slate-300 text-sm focus-visible:ring-indigo-500/40"
+              />
             </div>
+
             <div className="space-y-1.5">
-              <Label htmlFor="password">密码</Label>
+              <Label htmlFor="password" className="font-medium text-indigo-100/75 text-xs">
+                密码
+              </Label>
               <Input
                 id="password"
                 type="password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                placeholder="请输入密码"
+                placeholder="请输入访问密码"
                 autoFocus
                 autoComplete="current-password"
+                className="h-10 border-white/12 bg-white/[0.06] text-sm text-white placeholder:text-slate-400/60 focus-visible:border-indigo-400 focus-visible:ring-indigo-500/30"
               />
             </div>
-            {error && <p className="text-sm text-destructive">{error}</p>}
-            <Button type="submit" className="w-full" disabled={loading || !password}>
-              {loading ? "登录中..." : "登录"}
+
+            {error && (
+              <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-center text-red-300 text-xs">
+                {error}
+              </div>
+            )}
+
+            <Button
+              type="submit"
+              disabled={loading || !password}
+              className="mt-1 h-10 w-full gap-2 bg-linear-to-r from-indigo-500/90 to-violet-600/90 font-medium text-sm text-white shadow-[0_4px_24px_-2px_rgba(99,102,241,0.55)] transition-all hover:from-indigo-500 hover:to-violet-500 disabled:opacity-40"
+            >
+              <span>{loading ? "登录中..." : "启程"}</span>
+              {!loading && <ArrowRight className="size-4" />}
             </Button>
           </form>
         </div>
+      </div>
+
+      {/* Bottom spacer for vertical balance */}
+      <div className="relative z-10 flex items-center justify-between font-mono text-[11px] text-indigo-200/35 tracking-widest">
+        <span>POLARIS AUTONOMOUS ENGINE</span>
+        <span className="sm:hidden">N 90°00′</span>
       </div>
     </div>
   );
