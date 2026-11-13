@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"fmt"
+	"math"
 	"time"
 )
 
@@ -51,4 +53,25 @@ func clampMaxDuration(deadlineUnix int64, ownBudget time.Duration) (eff time.Dur
 		eff = ownBudget
 	}
 	return eff, clamped
+}
+
+// remainingBudgetLine renders the time left before the task deadline as a
+// strategy nudge for the planner's situational block (sapper-v2's time_budget):
+// near the deadline the planner should prefer cheap high-yield work over deep
+// rabbit holes. The deadline machinery clamps run budgets, but without this
+// line the planner never SEES the clock until the final round — too late to
+// change strategy.
+func remainingBudgetLine(deadlineUnix int64) string {
+	remaining := time.Until(time.Unix(deadlineUnix, 0))
+	var left string
+	switch {
+	case remaining <= 0:
+		left = "已到点"
+	case remaining >= time.Hour:
+		left = fmt.Sprintf("约剩 %.1f 小时", remaining.Hours())
+	default:
+		// 向上取整：剩 20 秒显示"1 分钟"而不是误导性的"0 分钟"
+		left = fmt.Sprintf("约剩 %.0f 分钟", math.Ceil(remaining.Minutes()))
+	}
+	return left + "。时间紧时优先高性价比动作（凭据复用/已知 CVE 直打/未授权接口），放弃深坑探索。"
 }

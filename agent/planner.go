@@ -336,6 +336,10 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	tc := taskClockFrom(ctx)
 	if tc.Final {
 		situational += "\n\n【任务终局收尾（本轮特殊指令，覆盖上面的常规规划流程）】：" + resolveTaskTimeoutWrapup("planner")
+	} else if tc.DeadlineUnix > 0 {
+		// 时间预算感知（N6）：deadline 只夹逼运行时长，planner 自己看不见钟——终局轮才
+		// 揭示已太晚。带 deadline 的任务每轮告知剩余时间，驱动"时间紧优先高性价比动作"。
+		situational += "\n\n【时间预算】" + remainingBudgetLine(tc.DeadlineUnix)
 	}
 	// 本任务的工作目录 <workDir>/tasks/<taskID>，先建好。
 	taskDir := ensureRunDir(p.workDir, taskID, 0)

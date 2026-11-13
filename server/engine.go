@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -262,10 +263,40 @@ func (e *Engine) registerTaskRoutines(parent context.Context, taskID string, cou
 	return rt
 }
 
+// routinePanicBackoff is the respawn delay after a task routine panics. Var so
+// the watchdog test can shorten it.
+var routinePanicBackoff = 5 * time.Second
+
+// runTaskRoutine runs one long-lived task routine (planner/worker/verifier/
+// hypothesizer/deadlineCoordinator loop). N4 panic watchdog: a panic in any of
+// these goroutines used to kill the whole process (and every concurrent task
+// with it). Recover, log the stack, and RE-RUN fn after a backoff. A NORMAL
+// return exits for good — several routines (deadlineCoordinator on terminal
+// status, workerLoop on admission failure) return without rt.ctx being done,
+// and blindly re-running those would spawn duplicate coordinators.
 func runTaskRoutine(rt *taskRuntime, fn func(context.Context)) {
 	go func() {
 		defer rt.wg.Done()
-		fn(rt.ctx)
+		for {
+			panicked := false
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						panicked = true
+						log.Printf("[routine] task routine panic, respawning after backoff: %v\n%s", r, debug.Stack())
+					}
+				}()
+				fn(rt.ctx)
+			}()
+			if !panicked {
+				return
+			}
+			select {
+			case <-rt.ctx.Done():
+				return
+			case <-time.After(routinePanicBackoff): // backoff: a crash-looping routine must not spin hot
+			}
+		}
 	}()
 }
 
@@ -1138,7 +1169,13 @@ func (e *Engine) workerLoop(ctx context.Context, t *Task, name string) {
 			continue // user-paused: don't claim/execute intents
 		}
 		if e.IsDeleting(t.ID) {
-			return
+			if sleepCtx(ctx, 1000*time.Millisecond) {
+				return
+			}
+			// 删除中不领意图；但别退出 goroutine——删除可能中止回滚(AbortDelete)恢复
+			// 运行，而 e.started 仍真、Run 只 Notify 不重建 routine，退出即永久缩容。
+			// 与其余 loop 对齐：生命周期只由 ctx.Done(StopTask) 终结。
+			continue
 		}
 		if e.isSettling(t.ID) {
 			if sleepCtx(ctx, 1000*time.Millisecond) {
@@ -1153,7 +1190,10 @@ func (e *Engine) workerLoop(ctx context.Context, t *Task, name string) {
 			continue // 任务已终态(done/failed/timeout):停止领取遗留意图,别在完成后空跑 frontier
 		}
 		if !e.beginTaskOperation(t.ID) {
-			return
+			if sleepCtx(ctx, 1000*time.Millisecond) {
+				return
+			}
+			continue // 并发槽满：等槽释放，别退出 goroutine（退出即永久缩容，见上）
 		}
 		claimed := e.runWorkerStep(ctx, t, name, worker)
 		e.decInflight(t.ID)
@@ -1184,6 +1224,17 @@ func (e *Engine) runWorkerStep(ctx context.Context, t *Task, name string, worker
 // must already hold one task-operation admission for the whole sequence so a delete
 // cannot observe quiescence between the LLM return and the final DB writes.
 func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker agent.AgentBackend, intent *db.Node, requestID, message string) bool {
+	// N4: runIntent 在任务 routine goroutine 内执行；runTaskRoutine 的 recover 会
+	// 重启整个 loop，但 panic 时本意图会卡在 running 无人再领。这里把意图回退 open，
+	// 让重启后的 loop 重新领取（与领取后 ctx 已取消的回退路径一致）。
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[worker %s] task %s 意图 #%d 执行 panic: %v\n%s", name, t.ID, intent.ID, r, debug.Stack())
+			if err := transitionIntentState(t.Store, intent.ID, "running", "open"); err != nil {
+				log.Printf("[worker %s] task %s 意图 #%d panic 后回退失败: %v", name, t.ID, intent.ID, err)
+			}
+		}
+	}()
 	hasChatMessage := message != ""
 	e.stampFirstRun(t) // 首次真正执行 → 盖 first_run_at + 算 deadline(仅带 timeout 的任务)
 	e.touch(t.ID)
@@ -1198,6 +1249,27 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker age
 	// per-work child context so the planner's kill_work can stop just this work.
 	workCtx, workCancel := context.WithCancelCause(ectx)
 	e.registerWork(intent.ID, workCancel)
+	// llmInFlight 追踪本 runIntent 栈帧内是否有一次未配对的 BeginLLMCall（fable 复审
+	// 阻断：llmCalls 是任务级共享计数器，兜底 defer 无条件 EndLLMCall 会把同任务
+	// 其它并发调用的计数误减清零——只有 Execute 内 panic 留下的未闭合 Begin 才补 End）。
+	llmInFlight := false
+	beginLLM := func() { e.BeginLLMCall(t.ID); llmInFlight = true }
+	endLLM := func() {
+		if llmInFlight {
+			llmInFlight = false
+			e.EndLLMCall(t.ID)
+		}
+	}
+	// N4 panic 兜底（fable 审查阻断 2）：下方的 detachWork/completeWork defer 与
+	// EndLLMCall 都在 Execute 返回之后才注册/配对；Execute 内 panic 会全部遗漏——
+	// llmCalls 计数永不归零（并发调度把该任务误判为常驻 LLM 调用）、work/steerBox
+	// 注册表残留、ControlWork waiter 卡到超时。全部幂等：正常路径的 defer（LIFO
+	// 更后注册）先执行，此处 detachWork 拿到空回调 no-op；endLLM 见 inFlight 守卫。
+	defer func() {
+		_, complete := e.detachWork(intent.ID)
+		complete(nil)
+		endLLM()
+	}()
 	// wrap the guard hooks so steer_work can inject a mid-run course-correction
 	// for THIS intent (drained before the worker's next tool call).
 	iid := intent.ID
@@ -1212,7 +1284,7 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker age
 	// primary backend for this intent (CLI when enabled, else the norma worker).
 	// `worker` (always the norma *Worker) doubles as the fallback below.
 	primary := e.pickBackend(worker)
-	e.BeginLLMCall(t.ID)
+	beginLLM()
 	var reason harness.TerminalReason
 	var wrote agent.WriteCounts
 	var err error
@@ -1221,7 +1293,7 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker age
 	} else {
 		reason, wrote, err = primary.Execute(workCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich, t.NotifyFinding)
 	}
-	e.EndLLMCall(t.ID)
+	endLLM()
 	// model_error 收场 → 额外重跑几次（退避后再试）。仅在意图仍属本 work、任务
 	// 未暂停/未终止/未取消【且未进入收尾】时重试；否则让位给对应分支处理(收尾期不
 	// 再重试,避免退避挤占其他 worker 的优雅收尾窗口)。
@@ -1233,13 +1305,13 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker age
 		if sleepCtx(workCtx, modelErrorRetryBackoff) {
 			break // 退避期间被取消（终止/暂停）→ 交给下方分支处理
 		}
-		e.BeginLLMCall(t.ID)
+		beginLLM()
 		if hasChatMessage {
 			reason, wrote, err = primary.ExecuteWithMessage(workCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich, t.NotifyFinding, requestID, message)
 		} else {
 			reason, wrote, err = primary.Execute(workCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich, t.NotifyFinding)
 		}
-		e.EndLLMCall(t.ID)
+		endLLM()
 	}
 	// CLI-backend fallback: if the CLI subprocess errored (bad key/proxy/model 5xx
 	// or a persistent model_error) and the run wasn't cancelled/paused/killed/
@@ -1251,13 +1323,13 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker age
 	if primary != worker && retryableWorkerModelError(reason, err) &&
 		workCtx.Err() == nil && ectx.Err() == nil && !e.IsPaused(t.ID) && !e.isSettling(t.ID) {
 		log.Printf("[worker %s] task %s 意图 #%d CLI 后端失败(%s)，回退 norma 重跑", name, t.ID, intent.ID, capErr(err))
-		e.BeginLLMCall(t.ID)
+		beginLLM()
 		if hasChatMessage {
 			reason, wrote, err = worker.ExecuteWithMessage(workCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich, t.NotifyFinding, requestID, message)
 		} else {
 			reason, wrote, err = worker.Execute(workCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich, t.NotifyFinding)
 		}
-		e.EndLLMCall(t.ID)
+		endLLM()
 	}
 	// ctx was cancelled (planner kill_work) while the TASK ctx kept running; a
 	// pause cancels the task ctx (ectx) instead. Checking workCtx.Err() AFTER
