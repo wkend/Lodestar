@@ -10,6 +10,13 @@ import (
 
 var wordRe = regexp.MustCompile(`[a-z0-9_]+`)
 
+// cjkRe matches a maximal run of CJK Unified Ideographs. Runs tokenize to
+// BIGRAMS (adjacent char pairs), not single chars: score() is an unnormalized
+// containment sum, and single common chars (的/用/过) would match nearly any
+// prose content and drown real matches in noise.
+// local divergence from upstream norma v0.3.3.
+var cjkRe = regexp.MustCompile(`[\x{4e00}-\x{9fff}]+`)
+
 var stop = map[string]bool{
 	"the": true, "a": true, "an": true, "and": true, "or": true, "of": true,
 	"to": true, "in": true, "is": true, "it": true, "for": true, "on": true,
@@ -18,11 +25,17 @@ var stop = map[string]bool{
 }
 
 func tokenize(s string) []string {
-	words := wordRe.FindAllString(strings.ToLower(s), -1)
+	s = strings.ToLower(s)
 	var out []string
-	for _, w := range words {
+	for _, w := range wordRe.FindAllString(s, -1) {
 		if len(w) >= 2 && !stop[w] {
 			out = append(out, w)
+		}
+	}
+	for _, run := range cjkRe.FindAllString(s, -1) {
+		rs := []rune(run)
+		for i := 0; i+1 < len(rs); i++ {
+			out = append(out, string(rs[i:i+2]))
 		}
 	}
 	return out

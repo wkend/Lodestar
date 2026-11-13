@@ -47,7 +47,11 @@ const indexFile = "MEMORY.md"
 
 func (s *Store) ensure() error { return os.MkdirAll(s.Dir, 0o755) }
 
-var slugRe = regexp.MustCompile(`[^a-z0-9]+`)
+// Keep Unicode letters/digits (incl. CJK) so a Chinese name keeps its
+// filename; the old [^a-z0-9]+ slugged every pure-CJK name to "" and all such
+// memories overwrote the same ".md" file.
+// local divergence from upstream norma v0.3.3.
+var slugRe = regexp.MustCompile(`[^\p{L}\p{N}]+`)
 
 func slug(name string) string {
 	s := slugRe.ReplaceAllString(strings.ToLower(name), "-")
