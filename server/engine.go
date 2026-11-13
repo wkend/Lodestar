@@ -1089,7 +1089,7 @@ func (e *Engine) verifierLoop(ctx context.Context, t *Task) {
 			}
 			log.Printf("[verifier] task %s 复核发现 #%d", t.ID, n.ID)
 			e.BeginLLMCall(t.ID)
-			err := vf.Verify(ectx, taskIDInt, t.Store, n, t.Goal, guard, emit)
+			err := vf.Verify(ectx, taskIDInt, t.Store, n, t.Goal, guard, t.NotifyVerifyFailed, emit)
 			e.EndLLMCall(t.ID)
 			if err != nil {
 				// 会话未正常结束（provider 故障 / 中断）：finding 没有被真正「尝试」，

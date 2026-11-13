@@ -94,15 +94,26 @@ func (t *ToolSet) recordVerification(nodeID int64) actool.CoreTool {
 			if err := t.ts.SetFindingVerification(nodeID, a.Verified, a.Issues, "verifier"); err != nil {
 				return actool.Errorf(err.Error()), nil
 			}
+			// 核验失败唤醒 planner：SetFindingVerification 只改 payload 不改 state，
+			// 图指纹不变 → plannerIdleGate 会跳过规划——不唤醒，planner 最长 60 分钟
+			// 不知道这条 finding 已被否决。verified=true 无需唤醒（无需补救动作）。
+			if !a.Verified && t.notifyVerify != nil {
+				t.notifyVerify(nodeID, a.Issues)
+			}
 			return actool.Text(fmt.Sprintf("verification recorded for finding %d: verified=%v", nodeID, a.Verified)), nil
 		})
 }
 
 // Verify re-checks one finding node: a single agent session, bounded by maxTurns.
 // hooks (the task's Guard) gate every shell/HTTP call the verifier makes.
-func (v *Verifier) Verify(ctx context.Context, taskID int64, ts *db.ExplorationStore, node *db.Node, goal string, hooks harness.HookRunner, emit func(db.Activity)) error {
+// notifyVerify, if non-nil, is called (findingID, issues) when the session FAILS the
+// finding (verified=false) so the task's planner wakes — a verification write changes
+// no graph fingerprint, so without this wake the refutation sits unseen (up to the
+// 60-min idle re-plan) while prove_goal may still accept the finding as evidence.
+func (v *Verifier) Verify(ctx context.Context, taskID int64, ts *db.ExplorationStore, node *db.Node, goal string, hooks harness.HookRunner, notifyVerify func(findingID int64, issues string), emit func(db.Activity)) error {
 	tsx := NewToolSet(ts, "verifier")
 	tsx.SetTaskID(taskID)
+	tsx.SetNotifyVerify(notifyVerify)
 	base := append([]actool.CoreTool{tsx.NodeDetailTool(), tsx.ListFactsTool(), tsx.recordVerification(node.ID)}, actool.DefaultTools()...)
 	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts)})
 	tools, def, cleanup := AugmentTools(ctx, "verifier", base)

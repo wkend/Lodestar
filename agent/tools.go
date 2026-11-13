@@ -89,6 +89,12 @@ type ToolSet struct {
 	// carrying (intentID, summary) so the round can spell out which intent found what.
 	// Wired for workers; nil elsewhere → falls back to notify (bare wake).
 	notifyFinding func(intentID int64, summary string)
+	// notifyVerify, if set, wakes the task's planner when a verifier session FAILS a
+	// finding (record_verification verified=false), carrying (findingID, issues). The
+	// graph fingerprint does not change on a verification write (payload-only), so the
+	// planner's idle gate would otherwise skip planning — this is the only wake path.
+	// Wired for the verifier; nil elsewhere.
+	notifyVerify func(findingID int64, issues string)
 	// resumeTask, if set, revives the task after a graph change that should make a
 	// stopped task run again (currently: set_goals adds a goal). It flips a terminal/
 	// paused task back to running and (re)starts the engine loops — a plain notify()
@@ -118,6 +124,10 @@ func (t *ToolSet) SetNotify(fn func()) { t.notify = fn }
 
 // SetNotifyFinding wires the finding-wake callback (see ToolSet.notifyFinding).
 func (t *ToolSet) SetNotifyFinding(fn func(int64, string)) { t.notifyFinding = fn }
+
+// SetNotifyVerify wires the verify-failed wake callback (see ToolSet.notifyVerify).
+// Set only by the verifier's ToolSet.
+func (t *ToolSet) SetNotifyVerify(fn func(int64, string)) { t.notifyVerify = fn }
 
 // EnrichTrigger is the enrichment engine seen from the tool layer (see package
 // enrich). Kept as an interface here to avoid coupling agent → enrich.
@@ -424,6 +434,20 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	factNodes, _ := t.ts.ListByKind(db.KindFact, 1000) // newest first
 	out["findings"] = len(vulnNodes)                   // 确认漏洞数（目标判定看它）
 	out["facts"] = len(factNodes)                      // 探索事实/结论数（含否定结论）
+	// 本任务最近 findings 的紧凑视图（含核验状态）。compactFinding 解析
+	// payload.verification——planner 据此看见自己任务里哪条 finding 被独立复核
+	// 否决（此前只有别的任务经 relatedTaskOverviews 可见，自己任务只有计数）。
+	// cap 10：本数据也流入每个 worker 的启动消息（renderWorkerGraphOverview 复用
+	// graphOverviewData），cap 保证 worker 启动增量可控；worker 顺带可见已确认
+	// 漏洞、避免重报。
+	recentFindings := make([]map[string]any, 0, 10)
+	for _, n := range vulnNodes {
+		if len(recentFindings) >= 10 {
+			break
+		}
+		recentFindings = append(recentFindings, compactFinding(n))
+	}
+	out["recent_findings"] = recentFindings
 	recentFacts := make([]map[string]any, 0, 20)
 	for _, n := range factNodes {
 		if len(recentFacts) >= 20 {
@@ -939,11 +963,11 @@ func (t *ToolSet) listFindings() actool.CoreTool {
 const factsPageSize = 20
 
 func (t *ToolSet) listFacts() actool.CoreTool {
-	return readTool("list_facts", "分页列本任务及直接关联任务的【探索事实/结论】，最新在前(紧凑：id+摘要+状态，摘要过长会截断，全文用 node_detail(id))。参数均可选：limit(默认 20，上限 100)、before(游标，传上一页返回的 next_before 取更旧的一页；省略/0=最新一页)、q(按摘要关键词过滤)。返回 {facts, total, has_more, next_before}：total 是过滤后的总数，has_more=true 时用 next_before 继续翻页。关联任务条目带 source_task_id/inherited=true 且只读。漏洞看 list_findings。",
+	return readTool("list_facts", "分页列本任务及直接关联任务的【探索事实/结论】，最新在前(紧凑：id+摘要+状态，摘要过长会截断，全文用 node_detail(id))。参数均可选：limit(默认 20，上限 100)、before(游标，传上一页返回的 next_before 取更旧的一页；省略/0=最新一页)、q(按摘要或细节关键词过滤)。返回 {facts, total, has_more, next_before}：total 是过滤后的总数，has_more=true 时用 next_before 继续翻页。关联任务条目带 source_task_id/inherited=true 且只读。漏洞看 list_findings。",
 		obj(map[string]any{
 			"limit":  intp("返回条数，默认 20，上限 100"),
 			"before": intp("分页游标：只返回 id 小于该值的更旧事实；省略或 0 = 最新一页"),
-			"q":      str("按事实摘要关键词过滤（不区分大小写）；省略 = 不过滤"),
+			"q":      str("按事实摘要/细节关键词过滤（不区分大小写）；省略 = 不过滤"),
 		}),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
@@ -1242,6 +1266,24 @@ func (t *ToolSet) proveGoal() actool.CoreTool {
 			evidenceNode, err := t.ts.GetNodeWithSources(ev)
 			if err != nil || evidenceNode == nil || (evidenceNode.Kind != db.KindFact && evidenceNode.Kind != db.KindFinding) {
 				return actool.Errorf("evidence_id 必须是本任务或直接关联任务的事实/漏洞节点"), nil
+			}
+			// 被独立复核【显式否决】的 finding 不能作为结案证据（核验写入只改 payload
+			// 不改 state，verified:false 是唯一标记）。只拒显式 false——绝不要求
+			// verified==true：Verifier 是 env 开关，要求 true 会在关闭部署下永久无法
+			// 结案。GetNodeWithSources 已覆盖 inherited finding，跨任务证据同样受检。
+			if evidenceNode.Kind == db.KindFinding {
+				var ep map[string]any
+				if json.Unmarshal(evidenceNode.Payload, &ep) == nil {
+					if v, ok := ep["verification"].(map[string]any); ok {
+						if verified, ok := v["verified"].(bool); ok && !verified {
+							issues := ""
+							if s, ok := v["issues"].(string); ok && s != "" {
+								issues = s
+							}
+							return actool.Errorf(fmt.Sprintf("evidence_id %d 的核验未通过(%s)——不能直接作为达成目标的证据，请先派复核意图重新验证，或改用其他确认证据", ev, issues)), nil
+						}
+					}
+				}
 			}
 			_ = t.ts.Link(ev, db.RelProves, goal)
 			_ = t.ts.SetNodeState(goal, "met")

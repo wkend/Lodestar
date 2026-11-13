@@ -1668,6 +1668,20 @@ func (t *Task) NotifyFinding(intentID int64, summary string) {
 	t.Notify()
 }
 
+// NotifyVerifyFailed records that the verifier FAILED findingID (issues = why the
+// re-check did not reproduce), then wakes the planner. The verification write is
+// payload-only — it changes no graph fingerprint — so without this wake the idle
+// gate keeps skipping planning and the refutation sits unseen up to 60 minutes.
+func (t *Task) NotifyVerifyFailed(findingID int64, issues string) {
+	t.trigMu.Lock()
+	t.pendingTriggers = append(t.pendingTriggers, agent.TriggerEvent{
+		Kind:   "verify_failed",
+		Detail: fmt.Sprintf("finding #%d 核验未通过：%s", findingID, issues),
+	})
+	t.trigMu.Unlock()
+	t.Notify()
+}
+
 // NotifyGoal records that one OR MORE goals were added in a single set_goals call —
 // by the human via the main agent — then wakes the planner, so the next round spells
 // out "人新增了 N 个目标：…" instead of the planner having to spot new open goals in

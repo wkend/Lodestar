@@ -729,15 +729,16 @@ ORDER BY id DESC LIMIT $4`, s.expID, kind, before, limit+1)
 	return nodes, hasMore, nil
 }
 
-// listByKindPageFiltered is ListByKindPage with an optional summary keyword
-// filter (payload->>'summary' ILIKE %q%). Fetches one extra row so the caller can
-// probe hasMore. Empty q = no filter. Newest-first by id.
+// listByKindPageFiltered is ListByKindPage with an optional keyword filter
+// (payload->>'summary' ILIKE %q% OR payload->>'detail' ILIKE %q% — technique
+// names / CVE ids often live in detail, not the one-line summary). Fetches one
+// extra row so the caller can probe hasMore. Empty q = no filter. Newest-first by id.
 func (s *ExplorationStore) listByKindPageFiltered(kind string, before int64, limit int, q string) ([]*Node, error) {
 	where := `exploration_id=$1 AND kind=$2 AND ($3 <= 0 OR id < $3)`
 	args := []any{s.expID, kind, before}
 	if q != "" {
 		args = append(args, "%"+q+"%")
-		where += fmt.Sprintf(` AND payload->>'summary' ILIKE $%d`, len(args))
+		where += fmt.Sprintf(` AND (payload->>'summary' ILIKE $%d OR payload->>'detail' ILIKE $%d)`, len(args), len(args))
 	}
 	args = append(args, limit+1)
 	rows, err := s.db.Query(`SELECT `+nodeCols+` FROM exploration_nodes
@@ -749,14 +750,14 @@ WHERE `+where+` ORDER BY id DESC LIMIT $`+fmt.Sprintf("%d", len(args)), args...)
 	return scanNodes(rows)
 }
 
-// countByKindFiltered counts nodes of a kind under the same summary filter, for a
-// page's total. Empty q = count all of that kind.
+// countByKindFiltered counts nodes of a kind under the same summary/detail filter,
+// for a page's total. Empty q = count all of that kind.
 func (s *ExplorationStore) countByKindFiltered(kind, q string) (int, error) {
 	where := `exploration_id=$1 AND kind=$2`
 	args := []any{s.expID, kind}
 	if q != "" {
 		args = append(args, "%"+q+"%")
-		where += fmt.Sprintf(` AND payload->>'summary' ILIKE $%d`, len(args))
+		where += fmt.Sprintf(` AND (payload->>'summary' ILIKE $%d OR payload->>'detail' ILIKE $%d)`, len(args), len(args))
 	}
 	var n int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM exploration_nodes WHERE `+where, args...).Scan(&n)
