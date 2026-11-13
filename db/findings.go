@@ -104,10 +104,13 @@ func (d *DB) AddFinding(taskID, nodeID int64, vulnclass, name, severity, summary
 }
 
 // findingSelectCols is the column list (with task_description join) every finding
-// list query selects, so scanFinding stays in sync across callers.
+// query shares. The trailing n.payload->'verification' requires every caller to
+// LEFT JOIN exploration_nodes n ON n.id = f.node_id — the list pages surface the
+// verifier's verdict (stage 7b), same as GetFinding.
 const findingSelectCols = `f.id, f.task_id, f.node_id, f.vulnclass, COALESCE(f.name, ''), f.severity, f.summary,
 	       f.evidence, f.worker, f.asset_ids, COALESCE(f.status, 'pending'), f.created_at,
-	       COALESCE(t.description, '') AS task_description`
+	       COALESCE(t.description, '') AS task_description,
+	       n.payload->'verification'`
 
 // scanFindings materializes rows selected via findingSelectCols.
 func scanFindings(rows interface {
@@ -119,14 +122,29 @@ func scanFindings(rows interface {
 	for rows.Next() {
 		f := &DBFinding{}
 		var aidsJSON string
+		var verifJSON sql.NullString
 		if err := rows.Scan(&f.ID, &f.TaskID, &f.NodeID, &f.VulnClass, &f.Name, &f.Severity,
-			&f.Summary, &f.Evidence, &f.Worker, &aidsJSON, &f.Status, &f.CreatedAt, &f.TaskDescription); err != nil {
+			&f.Summary, &f.Evidence, &f.Worker, &aidsJSON, &f.Status, &f.CreatedAt, &f.TaskDescription, &verifJSON); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(aidsJSON), &f.AssetIDs)
+		f.Verification = unmarshalVerification(verifJSON)
 		out = append(out, f)
 	}
 	return out, rows.Err()
+}
+
+// unmarshalVerification decodes the verifier's verdict JSON column (nil = not
+// verified yet; "null" = ditto). Shared by scanFindings and GetFinding.
+func unmarshalVerification(verifJSON sql.NullString) *FindingVerification {
+	if !verifJSON.Valid || verifJSON.String == "" || verifJSON.String == "null" {
+		return nil
+	}
+	var v FindingVerification
+	if err := json.Unmarshal([]byte(verifJSON.String), &v); err == nil {
+		return &v
+	}
+	return nil
 }
 
 // ListFindings returns all findings (newest first), joined with task description.
@@ -139,6 +157,7 @@ func (d *DB) ListFindings(limit int) ([]*DBFinding, error) {
 		SELECT `+findingSelectCols+`
 		FROM findings f
 		LEFT JOIN tasks t ON f.task_id = t.id
+		LEFT JOIN exploration_nodes n ON n.id = f.node_id
 		ORDER BY f.created_at DESC
 		LIMIT $1`, limit)
 	if err != nil {
@@ -267,7 +286,8 @@ func (d *DB) ListFindingsPage(f FindingFilter, page, pageSize int) ([]*DBFinding
 	q := fmt.Sprintf(`
 		SELECT %s
 		FROM findings f
-		LEFT JOIN tasks t ON f.task_id = t.id%s
+		LEFT JOIN tasks t ON f.task_id = t.id
+		LEFT JOIN exploration_nodes n ON n.id = f.node_id%s
 		ORDER BY %s
 		LIMIT $%d OFFSET $%d`, findingSelectCols, where, order, len(args)+1, len(args)+2)
 	rows, err := d.Query(q, pageArgs...)
@@ -486,6 +506,7 @@ func (d *DB) ListFindingsForExport(f FindingFilter, ids []int64) ([]*DBFinding, 
 		q = `SELECT ` + cols + `
 			FROM findings f
 			LEFT JOIN tasks t ON f.task_id = t.id
+			LEFT JOIN exploration_nodes n ON n.id = f.node_id
 			WHERE f.id IN (` + strings.Join(ph, ",") + `)
 			` + order
 	} else {
@@ -496,7 +517,8 @@ func (d *DB) ListFindingsForExport(f FindingFilter, ids []int64) ([]*DBFinding, 
 		where, wargs := scoped.where()
 		q = `SELECT ` + cols + `
 			FROM findings f
-			LEFT JOIN tasks t ON f.task_id = t.id` + where + `
+			LEFT JOIN tasks t ON f.task_id = t.id
+			LEFT JOIN exploration_nodes n ON n.id = f.node_id` + where + `
 			` + order
 		args = wargs
 	}
@@ -511,12 +533,14 @@ func (d *DB) ListFindingsForExport(f FindingFilter, ids []int64) ([]*DBFinding, 
 	for rows.Next() {
 		f := &DBFinding{}
 		var aidsJSON string
+		var verifJSON sql.NullString
 		if err := rows.Scan(&f.ID, &f.TaskID, &f.NodeID, &f.VulnClass, &f.Name, &f.Severity,
 			&f.Summary, &f.Evidence, &f.Worker, &aidsJSON, &f.Status, &f.CreatedAt,
-			&f.TaskDescription, &f.Report); err != nil {
+			&f.TaskDescription, &verifJSON, &f.Report); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(aidsJSON), &f.AssetIDs)
+		f.Verification = unmarshalVerification(verifJSON)
 		out = append(out, f)
 	}
 	return out, rows.Err()
@@ -636,15 +660,14 @@ func (d *DB) GetFinding(id int64) (*DBFinding, error) {
 	f := &DBFinding{}
 	var aidsJSON string
 	var verifJSON sql.NullString
-	err := d.QueryRow(`SELECT `+findingSelectCols+`, COALESCE(f.report, ''),
-		n.payload->'verification'
+	err := d.QueryRow(`SELECT `+findingSelectCols+`, COALESCE(f.report, '')
 		FROM findings f
 		LEFT JOIN tasks t ON f.task_id = t.id
 		LEFT JOIN exploration_nodes n ON n.id = f.node_id
 		WHERE f.id = $1`, id).Scan(
 		&f.ID, &f.TaskID, &f.NodeID, &f.VulnClass, &f.Name, &f.Severity,
 		&f.Summary, &f.Evidence, &f.Worker, &aidsJSON, &f.Status, &f.CreatedAt,
-		&f.TaskDescription, &f.Report, &verifJSON)
+		&f.TaskDescription, &verifJSON, &f.Report)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -652,12 +675,7 @@ func (d *DB) GetFinding(id int64) (*DBFinding, error) {
 		return nil, err
 	}
 	_ = json.Unmarshal([]byte(aidsJSON), &f.AssetIDs)
-	if verifJSON.Valid && verifJSON.String != "" && verifJSON.String != "null" {
-		var v FindingVerification
-		if json.Unmarshal([]byte(verifJSON.String), &v) == nil {
-			f.Verification = &v
-		}
-	}
+	f.Verification = unmarshalVerification(verifJSON)
 	return f, nil
 }
 
