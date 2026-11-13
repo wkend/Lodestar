@@ -967,6 +967,14 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 			log.Printf("[planner] task %s 规划出错: %v", t.ID, err)
 		case met:
 			log.Printf("[planner] task %s 判定目标达成: %s", t.ID, reason)
+			// N7 终局复核扫尾：落 done 前清一遍未复核积压（含跨图继承），终态时报告/
+			// 归档/下游拿到的 finding 都带核验状态。快任务（终态早于首个 verifier 心跳）
+			// 的唯一复核时机。verifier 关闭时内部 no-op。
+			if vf := e.snapshotVf(); vf != nil {
+				e.runVerifierSweep(ectx, t, func(vctx context.Context, taskID int64, store *db.ExplorationStore, node *db.Node) error {
+					return vf.Verify(vctx, taskID, store, node, t.Goal, t.Guard.Hooks(), t.NotifyVerifyFailed, emit)
+				})
+			}
 			// 所有目标达成 → 持久化任务状态为 done（前端 DTO 会优先展示该终态）。
 			if err := e.m.SetTaskStatus(t.ID, "done"); err != nil {
 				log.Printf("[planner] task %s 标记完成落库失败: %v", t.ID, err)
@@ -1060,6 +1068,54 @@ func (e *Engine) hypothesizerLoop(ctx context.Context, t *Task) {
 
 // verifierBatch caps how many unverified findings one heartbeat round considers.
 const verifierBatch = 3
+
+// verifierSweepCap bounds the terminal unverified-findings sweep. The sweep is
+// the LAST resort before a task goes terminal; large backlogs are normally
+// drained by the heartbeat path, so a cap keeps a pathological backlog from
+// stalling the terminal transition for many LLM sessions.
+const verifierSweepCap = 10
+
+// runVerifierSweep drains the unverified-findings backlog (own graph + direct
+// sources) once, synchronously, at a task's TERMINAL transition（N7 收尾）.
+// verifierLoop only ticks while the task is ALIVE — a task that finishes faster
+// than the first heartbeat would otherwise leave its findings (incl. inherited
+// ones) unverified forever: the terminal state then ships findings without
+// verdicts into reports/archives/downstream inheritors. Best-effort per item:
+// a failed verify session does NOT block the terminal status (the finding stays
+// unverified; another live task's loop or a later sweep can retry). vfTried
+// dedupes against the heartbeat path. verify is a parameter seam so the sweep
+// is unit-testable without a live provider; production passes vf.Verify.
+func (e *Engine) runVerifierSweep(ctx context.Context, t *Task, verify func(ctx context.Context, taskID int64, store *db.ExplorationStore, node *db.Node) error) {
+	if verify == nil || e.IsDeleting(t.ID) {
+		return
+	}
+	items, err := t.Store.ListUnverifiedFindingsWithSources(verifierSweepCap)
+	if err != nil || len(items) == 0 {
+		return
+	}
+	taskIDInt, _ := strconv.ParseInt(t.ID, 10, 64)
+	for _, item := range items {
+		if _, settled := e.vfTried.Load(item.Node.ID); settled {
+			continue // heartbeat path already settled it this process
+		}
+		vstore := t.Store
+		if item.Store != nil {
+			vstore = item.Store
+			log.Printf("[verifier] task %s 终局复核继承发现 #%d(源图 %d)", t.ID, item.Node.ID, item.Store.ID())
+		} else {
+			log.Printf("[verifier] task %s 终局复核本图发现 #%d", t.ID, item.Node.ID)
+		}
+		e.BeginLLMCall(t.ID)
+		verr := verify(ctx, taskIDInt, vstore, item.Node)
+		e.EndLLMCall(t.ID)
+		if verr != nil {
+			log.Printf("[verifier] task %s 终局复核 #%d 出错(不阻塞终态): %v", t.ID, item.Node.ID, verr)
+			continue // not stamped: retried by a live task's loop or a later sweep
+		}
+		e.vfTried.Store(item.Node.ID, true)
+		e.touch(t.ID)
+	}
+}
 
 // verifierLoop drives the finding re-check (Stage 7b). Heartbeat-only, like
 // hypothesizerLoop, and it never listens on t.notify, so it cannot race the planner.

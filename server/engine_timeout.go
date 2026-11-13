@@ -204,6 +204,13 @@ func (e *Engine) settleTask(ctx context.Context, t *Task) {
 
 	// ⑤ 终局一轮 planner(任务超时词,最后目标判定,不产新意图)。
 	met := e.runFinalPlannerRound(ctx, t)
+	// ⑤b N7 终局复核扫尾：定终态前清一遍未复核积压（含跨图继承）——快任务的
+	// finding 唯一的确定性复核时机，与常规完成路径同构。verifier 关闭时 no-op。
+	if vf := e.snapshotVf(); vf != nil {
+		e.runVerifierSweep(ctx, t, func(vctx context.Context, taskID int64, store *db.ExplorationStore, node *db.Node) error {
+			return vf.Verify(vctx, taskID, store, node, t.Goal, t.Guard.Hooks(), t.NotifyVerifyFailed, func(r db.Activity) { e.emitActivity(t, r) })
+		})
+	}
 	if !e.beginTaskOperation(t.ID) {
 		return
 	}
