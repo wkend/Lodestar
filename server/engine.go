@@ -1067,6 +1067,10 @@ const verifierBatch = 3
 // the backlog. A finding whose verify session COMPLETED (vfTried stamped) is not
 // re-run this process, so one the verifier cannot settle is not retried every
 // heartbeat; a provider-failed session is not stamped and retries next heartbeat.
+// N7：backlog 跨图——除本图外还覆盖 direct sources 继承来的未复核 finding（源任务
+// 终态后它自己的 verifierLoop 已死，继承任务是唯一活着的复核者）；verdict 写进
+// finding 所属的图（SetFindingVerification 是 exploration-scoped）；vfTried 按
+// 节点 id 进程级去重，多个下游任务继承同一条时本进程只复核一次。
 func (e *Engine) verifierLoop(ctx context.Context, t *Task) {
 	interval := plannerHeartbeatInterval(t)
 	heartbeat := time.NewTimer(interval)
@@ -1083,12 +1087,12 @@ func (e *Engine) verifierLoop(ctx context.Context, t *Task) {
 		if isTerminalStatus(t.lifecycleSnapshot().Status) {
 			return
 		}
-		nodes, err := t.Store.ListUnverifiedFindings(20)
+		nodes, err := t.Store.ListUnverifiedFindingsWithSources(20)
 		if err != nil {
 			log.Printf("[verifier] task %s 列未复核发现失败: %v", t.ID, err)
 			return
 		}
-		var todo []*db.Node
+		var todo []db.UnverifiedFinding
 		if len(nodes) > 0 {
 			// Admission first: the round's work below must only run once actually
 			// admitted (paused / deleting / concurrency cap would reject it).
@@ -1096,11 +1100,11 @@ func (e *Engine) verifierLoop(ctx context.Context, t *Task) {
 				return
 			}
 			defer e.decInflight(t.ID)
-			for _, n := range nodes {
-				if _, settled := e.vfTried.Load(n.ID); settled {
+			for _, item := range nodes {
+				if _, settled := e.vfTried.Load(item.Node.ID); settled {
 					continue
 				}
-				todo = append(todo, n)
+				todo = append(todo, item)
 				if len(todo) == verifierBatch {
 					break
 				}
@@ -1114,13 +1118,22 @@ func (e *Engine) verifierLoop(ctx context.Context, t *Task) {
 		ectx := e.clockCtx(e.execContextFor(ctx, t.ID), t, false)
 		taskIDInt, _ := strconv.ParseInt(t.ID, 10, 64)
 		guard := t.Guard.Hooks()
-		for _, n := range todo {
+		for _, item := range todo {
 			if ectx.Err() != nil || e.IsPaused(t.ID) || e.IsDeleting(t.ID) {
 				return
 			}
-			log.Printf("[verifier] task %s 复核发现 #%d", t.ID, n.ID)
+			n := item.Node
+			// N7：跨图复核——inherited finding 的 verdict 必须写进它【所属】的图
+			// （SetFindingVerification 是 exploration-scoped）。谁继承谁复核。
+			vstore := t.Store
+			if item.Store != nil {
+				vstore = item.Store
+				log.Printf("[verifier] task %s 复核继承发现 #%d(源图 %d)", t.ID, n.ID, item.Store.ID())
+			} else {
+				log.Printf("[verifier] task %s 复核发现 #%d", t.ID, n.ID)
+			}
 			e.BeginLLMCall(t.ID)
-			err := vf.Verify(ectx, taskIDInt, t.Store, n, t.Goal, guard, t.NotifyVerifyFailed, emit)
+			err := vf.Verify(ectx, taskIDInt, vstore, n, t.Goal, guard, t.NotifyVerifyFailed, emit)
 			e.EndLLMCall(t.ID)
 			if err != nil {
 				// 会话未正常结束（provider 故障 / 中断）：finding 没有被真正「尝试」，
@@ -1131,6 +1144,9 @@ func (e *Engine) verifierLoop(ctx context.Context, t *Task) {
 					log.Printf("[verifier] task %s 复核 #%d 出错(不消耗尝试名额,下轮重试): %v", t.ID, n.ID, err)
 				}
 			} else {
+				// vfTried 按节点 id 进程级去重：同一条 inherited finding 被多个下游
+				// 任务继承时，本进程只复核一次（复选窗口=挑选到盖章之间，极小；重复
+				// 复核幂等，verdict payload 合并写）。
 				e.vfTried.Store(n.ID, true)
 			}
 			e.touch(t.ID)

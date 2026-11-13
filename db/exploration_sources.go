@@ -13,6 +13,52 @@ type DirectSourceStore struct {
 	Store *ExplorationStore
 }
 
+// UnverifiedFinding pairs an unverified finding with the store that owns it.
+// Own-graph findings carry a nil Store; findings inherited from a direct source
+// carry that source's store, so a verifier writes its verdict into the OWNING
+// exploration (SetFindingVerification is exploration-scoped).
+type UnverifiedFinding struct {
+	Node  *Node
+	Store *ExplorationStore // nil = 本图
+}
+
+// ListUnverifiedFindingsWithSources spans this exploration AND its direct
+// sources (N7): the verifier backlog also covers inherited findings — a
+// finding inherited from a finished source task would otherwise never be
+// verified by anyone (the source's own verifier loop dies with the task, and
+// ListUnverifiedFindings only queries the own graph). Own findings first, then
+// per-source, each oldest-first; capped at limit overall.
+func (s *ExplorationStore) ListUnverifiedFindingsWithSources(limit int) ([]UnverifiedFinding, error) {
+	own, err := s.ListUnverifiedFindings(limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]UnverifiedFinding, 0, len(own))
+	for _, n := range own {
+		out = append(out, UnverifiedFinding{Node: n})
+	}
+	if len(out) >= limit {
+		return out, nil // own 已占满：sources 零开销跳过
+	}
+	sources, err := s.DirectSourceStores()
+	if err != nil {
+		return nil, err
+	}
+	for _, source := range sources {
+		if len(out) >= limit {
+			break
+		}
+		nodes, err := source.Store.ListUnverifiedFindings(limit - len(out))
+		if err != nil {
+			return nil, err
+		}
+		for _, n := range nodes {
+			out = append(out, UnverifiedFinding{Node: n, Store: source.Store})
+		}
+	}
+	return out, nil
+}
+
 // DirectSourceStores resolves the live, direct task relations for this
 // exploration. It deliberately queries on every call: relations disappear when
 // a source task is deleted, and inherited context must not retain stale rows.
