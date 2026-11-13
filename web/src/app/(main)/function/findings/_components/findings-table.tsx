@@ -27,6 +27,7 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
@@ -192,18 +193,38 @@ export function FindingsTable({
                 </TableCell>
                 <TableCell className="max-w-md">
                   <div className="flex min-w-0 flex-col gap-0.5">
-                    {f.finding_id ? (
-                      <Link
-                        href={`/function/findings/detail?id=${f.finding_id}`}
-                        onClick={(e) => e.stopPropagation()}
-                        className="truncate font-medium hover:text-primary hover:underline"
-                        title="查看发现详情"
-                      >
-                        {f.name || f.vulnclass || "未分类"}
-                      </Link>
-                    ) : (
-                      <span className="truncate font-medium">{f.name || f.vulnclass || "未分类"}</span>
-                    )}
+                    <div className="flex min-w-0 items-center gap-1.5">
+                      {f.finding_id ? (
+                        <Link
+                          href={`/function/findings/detail?id=${f.finding_id}`}
+                          onClick={(e) => e.stopPropagation()}
+                          className="truncate font-medium hover:text-primary hover:underline"
+                          title="查看发现详情"
+                        >
+                          {f.name || f.vulnclass || "未分类"}
+                        </Link>
+                      ) : (
+                        <span className="truncate font-medium">{f.name || f.vulnclass || "未分类"}</span>
+                      )}
+                      {f.verification && (
+                        <Badge
+                          variant="outline"
+                          className={cn(
+                            "shrink-0",
+                            f.verification.verified
+                              ? "border-emerald-600 text-emerald-600"
+                              : "border-amber-600 text-amber-600",
+                          )}
+                          title={
+                            f.verification.verified
+                              ? "独立复核已复现该漏洞证据"
+                              : `独立复核未复现：${f.verification.issues ?? "未说明"}`
+                          }
+                        >
+                          {f.verification.verified ? "已复现" : "未复现"}
+                        </Badge>
+                      )}
+                    </div>
                     <span className="truncate text-xs text-muted-foreground">{f.summary}</span>
                   </div>
                 </TableCell>

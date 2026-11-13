@@ -73,6 +73,24 @@ function Row({
           <div className="flex min-w-0 flex-1 flex-col gap-1">
             <div className="flex min-w-0 items-center gap-2">
               <span className="truncate font-medium">{findingLabel(f)}</span>
+              {f.verification && (
+                <Badge
+                  variant="outline"
+                  className={cn(
+                    "shrink-0",
+                    f.verification.verified
+                      ? "border-emerald-600 text-emerald-600"
+                      : "border-amber-600 text-amber-600",
+                  )}
+                  title={
+                    f.verification.verified
+                      ? "独立复核已复现该漏洞证据"
+                      : `独立复核未复现：${f.verification.issues ?? "未说明"}`
+                  }
+                >
+                  {f.verification.verified ? "已复现" : "未复现"}
+                </Badge>
+              )}
               {f.inherited && f.source_task_id && (
                 <Badge variant="outline" className="shrink-0">
                   来源 #{f.source_task_id} · 只读
