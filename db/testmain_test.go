@@ -8,15 +8,16 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
-// TestMain acquires a PostgreSQL advisory lock (7337741002) for the entire
-// db test suite. Packages agent and server hold the same lock, so parallel
-// `go test ./...` runs serialize across packages on the shared dev DB and
-// avoid cross-package cleanup races (e.g. DELETE FROM assets WHERE id > X
-// from one package deleting assets created by another).
+// TestMain acquires the cross-package advisory lock (7337741002) FIRST — the
+// lock serializes concurrent `go test ./...` processes on the PG cluster, and
+// it must be held before PrepareTestDatabase drops/recreates the package's
+// throwaway database, or a second concurrent run of the same package would
+// DROP the database out from under the first. On top of the lock it then
+// provisions the per-package database (PrepareTestDatabase — agent/db/server
+// suites used to share one database and leaked rows into each other).
 func TestMain(m *testing.M) {
 	dsn, _, err := DSN()
 	if err != nil {
-		// No DB configured — tests that need PG will skip themselves.
 		os.Exit(m.Run())
 	}
 	conn, err := sql.Open("pgx", dsn)
@@ -28,5 +29,12 @@ func TestMain(m *testing.M) {
 		os.Exit(m.Run())
 	}
 	defer conn.Exec(`SELECT pg_advisory_unlock(7337741002)`) //nolint:errcheck
-	os.Exit(m.Run())
+	cleanup, ok := PrepareTestDatabase("db")
+	if !ok {
+		// 无库配置/不可达/非 postgres URL → m.Run() 照跑，PG 相关测试各自 skip。
+		os.Exit(m.Run())
+	}
+	code := m.Run()
+	cleanup() // os.Exit skips defers — drop the throwaway DB explicitly
+	os.Exit(code)
 }
