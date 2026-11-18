@@ -1046,12 +1046,18 @@ type intentItem struct {
 	AssetIDs  []json.RawMessage `json:"asset_ids"`
 	ParentIDs []json.RawMessage `json:"parent_ids"`
 	Priority  int               `json:"priority"`
+	// Serial 标记串行链意图（L1 代谢）：planner 的 TodoWrite 串行利用链（①→②→③ 后
+	// 步依赖前步产出）里的意图标 true——引擎预算解析器据此豁免饿瘦（链是 planner
+	// 判定的关键路径，不是空转战役）。非链意图不用传（默认 false）。
+	Serial *bool `json:"serial"`
 }
 
 // intentFingerprint 归一化一条意图为去重键：小写 summary、去标点、按词集排序去重，
 // 再拼上排序后的 asset_ids。目的只拦"纯换措辞/大小写/语序/同一句打同一资产"这类
 // 字面重复(与 planner 提示词"只是换个措辞不算新机理"对齐)；同义词改写拦不住,那属
 // 语义判断,不在此列。asset_ids 参与指纹:同一句话打【不同】资产是不同意图,不去重。
+func IntentFingerprint(summary string, assetIDs []int64) string { return intentFingerprint(summary, assetIDs) }
+
 func intentFingerprint(summary string, assetIDs []int64) string {
 	// 词集:小写后按非字母数字切分,去重排序 → 语序无关。中文按 rune 无空格,这里
 	// 主要归一化英文/标点/大小写;中文串整体作为一个 token 也能拦住完全相同的中文句。
@@ -1144,6 +1150,10 @@ func (t *ToolSet) addOneIntent(it intentItem) (id int64, dup bool, err error) {
 	if len(anchors) > 0 {
 		payload["asset_ids"] = anchors
 	}
+	// L1 代谢 serial 标记：串行链意图进 payload，预算解析器读取（饿瘦豁免）。
+	if it.Serial != nil && *it.Serial {
+		payload["serial"] = true
+	}
 	id, err = t.ts.AddIntent(payload, priority, anchors, "planner")
 	if err != nil {
 		return 0, false, err
@@ -1173,6 +1183,7 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 			"asset_ids":  map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "本方向要测试/攻击的【目标资产 id】（**尽量传**，0/1/多个；是 list_assets 返回的资产 id，不是探索节点 id）：这条探索方向针对哪些资产（站点/接口/参数/主机等）。只要方向围绕某些具体资产就务必传上——它是「这条探索打哪些目标」的结构化标记，用于覆盖去重、把意图连入资产链路。仅当纯全局侦察、确实没有具体目标资产时才留空。"},
 			"parent_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "上游锚点 id（可选，0/1/多个）：本方向由哪些【已确认的事实(fact)/发现(finding)】或【待验证假设(hypothesis)】综合得出。**只能填已存在的 fact/finding/hypothesis 节点 id,不能填意图/目标/提示**——意图必须锚在已确认知识或第二 brain 的假设上,发现驱动而非凭空规划。派意图去验证某条假设时,把该假设 id 放这里(intent--derived_from-->hypothesis)。多个事实共同产生一个新意图就传多个;顶层全新侦察方向请留空（会自动挂到任务起点 origin fact）。"},
 			"priority":   intp("优先级 0-10，默认5"),
+			"serial":     map[string]any{"type": "boolean", "description": "串行链标记：你用 TodoWrite 规划的串行利用链（①→②→③，后步依赖前步的实际产出）里的意图必须传 true——系统会保障它的执行预算不被方向级预算竞争饿瘦。非链意图不传。"},
 		}),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {

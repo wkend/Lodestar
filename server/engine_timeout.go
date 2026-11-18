@@ -18,7 +18,10 @@ import (
 //   ④ 等在跑 worker drain(受 grace) → ⑤ 终局一轮 planner 判定 → ⑥ 定终态(带守卫)
 
 const (
-	settleDrainGrace     = 90 * time.Second // 等在跑 worker 优雅收尾的上限;超过则硬 cancel
+	// settleDrainGrace 等在跑 worker 优雅收尾的上限;超过则硬 cancel。
+	// 240s（2026-11-17 显微镜实测从 90s 上调：任务墙截断的意图 #4 收尾轮在 90s 内
+	// 没跑完→写回 0——LLM 均值 14.2s、尾部 64s，收尾 2-3 回合 ≈130s，90s 必击穿）。
+	settleDrainGrace     = 240 * time.Second
 	deadlinePollInterval = 2 * time.Second  // deadline 未盖章/LLM 未就绪时的轮询间隔
 	deadlineMaxSleep     = 30 * time.Second // 单次最长睡眠(便于周期复查终态)
 )

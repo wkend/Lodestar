@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -127,6 +128,10 @@ type Engine struct {
 	// settle"). A provider-failed session is not stamped and retries next heartbeat.
 	verifier *agent.Verifier
 	vfTried  sync.Map
+
+	// 继承者（文明保障层，docs/自主进化设计.md）：零写回横死意图的遗产提取。
+	// nil = 禁用。由 runIntent 的死亡分支异步触发，不阻塞 worker 循环。
+	inheritor *agent.Inheritor
 
 	// deleteMu makes installing the delete barrier atomic with registering a new
 	// task operation. Once BeginDelete returns, every admitted writer is reflected
@@ -737,6 +742,71 @@ func (e *Engine) snapshotVf() *agent.Verifier {
 	defer e.mu.RUnlock()
 	return e.verifier
 }
+
+// SetInheritor installs the posthumous extraction role (inheritance pass for
+// zero-writeback violent intent deaths). nil = disabled.
+func (e *Engine) SetInheritor(v *agent.Inheritor) {
+	e.mu.Lock()
+	e.inheritor = v
+	e.mu.Unlock()
+}
+
+func (e *Engine) snapshotInh() *agent.Inheritor {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.inheritor
+}
+
+// maybeInherit schedules an async inheritance pass for a dead intent (文明保障层：
+// 个体的死不带走它的知识). Trigger conditions: inheritor enabled, violent death
+// with zero write-back (agent.ShouldInherit), the intent actually ran (≥3 activity
+// rows — an intent that never claimed a tool call has no estate), and the task is
+// still live (settle/terminal deaths are covered by the final verifier sweep path
+// and would extend the drain window). Async goroutine: the worker loop must keep
+// claiming the next intent immediately; the pass costs one LLM call.
+func (e *Engine) maybeInherit(ctx context.Context, t *Task, intent *db.Node, state string, wrote agent.WriteCounts) {
+	inh := e.snapshotInh()
+	if inh == nil || !agent.ShouldInherit(state, wrote) {
+		return
+	}
+	if e.isSettling(t.ID) || isTerminalStatus(e.m.TaskStatus(t.ID)) {
+		return
+	}
+	// 空壳死亡不继承：意图没真正跑过就没有遗产（避免为 0 产出的意图烧调用）。
+	if acts, _, err := t.Store.ActivityList(&intent.ID, 0, 3); err != nil || len(acts) < 3 {
+		return
+	}
+	if !e.beginTaskOperation(t.ID) {
+		return
+	}
+	taskID, _ := strconv.ParseInt(t.ID, 10, 64)
+	iid := intent.ID
+	go func() {
+		defer e.decInflight(t.ID)
+		// 意图状态可能已被并发改写（重开等），取当前节点快照传给继承者。
+		node, err := t.Store.GetNode(iid)
+		if err != nil || node == nil {
+			return
+		}
+		log.Printf("[inheritor] task %s 意图 #%d 横死零写回，启动遗产提取", t.ID, iid)
+		ictx, cancel := context.WithTimeout(ctx, inheritPassTimeout)
+		defer cancel()
+		e.BeginLLMCall(t.ID)
+		defer e.EndLLMCall(t.ID)
+		emit := func(r db.Activity) { e.emitActivity(t, r) }
+		if err := inh.Inherit(ictx, taskID, e.m.assets, t.Store, node, t.Goal, emit, e.m.enrich, t.NotifyFinding); err != nil {
+			log.Printf("[inheritor] task %s 意图 #%d 遗产提取失败: %v", t.ID, iid, err)
+			return
+		}
+		// 遗产入图 → 唤醒 planner 立即看到死者的知识（不必等心跳）。
+		t.Notify()
+		log.Printf("[inheritor] task %s 意图 #%d 遗产提取完成", t.ID, iid)
+	}()
+}
+
+// inheritPassTimeout bounds the async inheritance goroutine (engine 侧硬顶；
+// agent 侧另有 MaxDuration/inheritMaxDuration 软预算 + settlement；硬顶=软预算×2)。
+const inheritPassTimeout = 10 * time.Minute
 
 // pickBackend chooses the primary backend for one intent: the CLI worker when
 // configured, else the per-task norma worker. Global-switch only for now — no
@@ -1482,6 +1552,9 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker age
 		}
 		log.Printf("[worker %s] task %s 意图 #%d 被终止(stopped)", name, t.ID, intent.ID)
 		e.touch(t.ID)
+		// 处决分支的遗产提取：kill 不写回是"不写结果"的设计，但轨迹里的真实发现
+		// 不应随会话蒸发（ATLAS 实测：48 次工具调用的 WAF 情报因盲杀+零写回全灭）。
+		e.maybeInherit(ctx, t, intent, "stopped", wrote)
 		t.Notify()
 		return true
 	}
@@ -1510,8 +1583,38 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker age
 	}
 	log.Printf("[worker %s] task %s 意图 #%d 结束: %s (写回 %s)", name, t.ID, intent.ID, state, wrote)
 	e.touch(t.ID)
+	e.recordCampaignYield(t, intent, wrote)
+	// blocked/exhausted 的零写回死亡同样触发遗产提取（done 是 worker 自己的判断，尊重不提）。
+	e.maybeInherit(ctx, t, intent, state, wrote)
 	t.NotifyDone(intent.ID) // results changed the graph -> wake the planner (with the just-finished intent id)
 	return true
+}
+
+// recordCampaignYield 把终态原始计数写入战役轻表（L1 代谢记账）。best-effort：
+// 失败只记日志——记账是预算解析的输入，缺行只会让该战役保持基础预算（安全方向）。
+// 战役键 = intentFingerprint(summary, asset_ids)，agent 包同构（v2.3 P0-2 修订）。
+func (e *Engine) recordCampaignYield(t *Task, intent *db.Node, wrote agent.WriteCounts) {
+	if t == nil || intent == nil {
+		return
+	}
+	expID := t.Store.ID()
+	if _, err := t.Store.GetNode(intent.ID); err != nil { // 已删意图不记账
+		return
+	}
+	var p struct {
+		Summary   string  `json:"summary"`
+		AssetIDs []int64 `json:"asset_ids"`
+	}
+	if json.Unmarshal(intent.Payload, &p) != nil || p.Summary == "" {
+		return
+	}
+	key := agent.IntentFingerprint(p.Summary, p.AssetIDs)
+	if key == "" {
+		return
+	}
+	if err := e.m.PG().AppendCampaignYield(expID, key, wrote.Facts, wrote.Assets, wrote.Findings); err != nil {
+		log.Printf("[campaign] task %s 意图 #%d 记账失败(忽略): %v", t.ID, intent.ID, err)
+	}
 }
 
 // runDetachedIntent runs one paused intent OUTSIDE the worker pool in its own

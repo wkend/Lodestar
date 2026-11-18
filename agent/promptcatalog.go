@@ -117,5 +117,6 @@ func BuiltinPromptSeeds() map[string]string {
 		"pentest":      pentestDefaultTmpl,
 		"hypothesizer": hypothesizerDefaultTmpl, // 第二 brain(6b)：种子入库后可在 UI 查看/编辑/恢复默认
 		"verifier":     verifierDefaultTmpl,     // 发现复核(7b)：同上
+		"inheritor":    inheritorDefaultTmpl,    // 继承者：横死意图的遗产提取（文明保障层）
 	}
 }

@@ -101,6 +101,10 @@ func main() {
 		}
 	}()
 
+	// bench 模式：BENCHMARK_TOKEN 存在（评测平台注入）时自动对接平台答题，
+	// 无 token 时 RunBench 立即返回、零副作用。
+	go srv.RunBench(ctx)
+
 	<-ctx.Done()
 	log.Println("shutting down...")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

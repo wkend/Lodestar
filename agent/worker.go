@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/wkend/lodestar/db"
@@ -70,6 +71,64 @@ type Worker struct {
 	// maxTokensFn resolves the per-reply output cap in tokens, on the same
 	// per-run basis. nil or 0 = send no cap and let the endpoint decide.
 	maxTokensFn func() int
+
+	// 延迟观察（发现 12 宽限自适应）：本 worker 实例历次执行观察到的最大单次模型
+	// 调用延迟。worker 是共享实例（多任务复用），观察值单调不衰减——宽限只升不降，
+	// 与"最坏回合决定收尾能否完成"的语义一致。
+	maxCallLatency atomic.Int64 // 纳秒；0 = 尚无观察
+
+	// L1 代谢：战役记账表（nil = 代谢关闭，预算恒为基础值）。
+	ledger CampaignLedger
+}
+
+// observeLatency records a per-turn wall-clock observation (called from the
+// usage-activity path in execute: each usage event marks one model turn done).
+func (w *Worker) observeLatency(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	for {
+		old := w.maxCallLatency.Load()
+		if int64(d) <= old {
+			return
+		}
+		if w.maxCallLatency.CompareAndSwap(old, int64(d)) {
+			return
+		}
+	}
+}
+
+// settleHardGrace returns the adaptive settlement backstop for this run:
+// max(240s floor, 3 × largest observed model-turn latency), capped at 10min.
+func (w *Worker) settleHardGrace() time.Duration {
+	return settleGraceFloorFromLatency(time.Duration(w.maxCallLatency.Load()))
+}
+
+// campaignMultiplier resolves the L1 metabolism budget multiplier for the intent
+// this worker is about to run. 1.0 = base budget unchanged (no ledger, no
+// campaign history, serial chain, or observation period). Errors degrade to 1.0 —
+// metabolism never blocks a run.
+func (w *Worker) campaignMultiplier(intent *db.Node) float64 {
+	if w.ledger == nil || intent == nil {
+		return 1.0
+	}
+	var p struct {
+		Serial    bool    `json:"serial"`
+		AssetIDs []int64 `json:"asset_ids"`
+		Summary   string  `json:"summary"`
+	}
+	if json.Unmarshal(intent.Payload, &p) != nil {
+		return 1.0
+	}
+	key := intentFingerprint(p.Summary, p.AssetIDs)
+	if key == "" {
+		return 1.0
+	}
+	runs, err := w.ledger.Recent(key, 16)
+	if err != nil || len(runs) == 0 {
+		return 1.0
+	}
+	return BudgetFor(runs, p.Serial)
 }
 
 // WorkerSessionID returns the stable transcript key used by a worker intent.
@@ -128,10 +187,34 @@ func (w *Worker) SetRunTimeout(run time.Duration) {
 	w.runTimeout = run
 }
 
-// settleHardGrace is how far past the soft wall-clock budget (runTimeout) the hard
-// ctx deadline sits — a backstop for a hung turn; the soft budget handles the
-// normal case at the turn boundary.
-const settleHardGrace = 90 * time.Second
+// SetCampaignLedger wires the L1 metabolism ledger（代谢记账表）。nil = disabled →
+// 预算恒为基础值（行为与无代谢完全一致）。非 nil 时 execute 领意图后按战役近期产出
+// 解析本次预算倍率（BudgetFor），乘在基础 runTimeout 上。
+func (w *Worker) SetCampaignLedger(ledger CampaignLedger) {
+	w.ledger = ledger
+}
+
+// settleHardGraceFloor 是 settleHardGrace 的下限。宽限自适应（判读报告发现 12）：
+// worker 无 DB 依赖，用静态底 + 运行期观察；240s 底 = 2026-11-17 显微镜实测校准值
+// （LLM 均值 14.2s/尾部 64s，收尾轮 2-3 回合；第三轮观察到 392s 超长回合——宽限
+// 须随近程延迟观测上浮，见 w.observeLatency/w.settleHardGrace）。
+const settleHardGraceFloor = 240 * time.Second
+
+// settleGraceFloorFromLatency 把单次调用延迟换算成宽限下限的保守函数：
+// 假设收尾轮最多 3 个串行回合（写回工具调用不占 LLM 时间），取 3× 延迟。
+// 与引擎侧 settleDrainGrace 同数量级，两侧独立保守（谁先到谁兜底）。
+func settleGraceFloorFromLatency(d time.Duration) time.Duration {
+	grace := 3 * d
+	if grace < settleHardGraceFloor {
+		grace = settleHardGraceFloor
+	}
+	// 上限：宽限再大也不能让一次意图无限拖（引擎 settleDrainGrace 的 240s 先到，
+	// 这里超了也只在无墙场景生效——worker 自身预算路径）。
+	if grace > 10*time.Minute {
+		grace = 10 * time.Minute
+	}
+	return grace
+}
 
 // settleWrapUpPrompt is injected by the SDK settlement phase when a worker hits its
 // turn/time budget: stop probing, write back what was found, then end with a
@@ -358,8 +441,14 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	}
 	system, boundary := deferredSystem(sysBody, def)
 	// 任务级 deadline(经 ctx 注入)夹逼本 run 的墙钟预算 + 决定收尾词(见 taskclock.go)。
+	// L1 代谢：基础预算先按战役近期产出解析（BudgetFor 倍率 × runTimeout），再进夹逼。
+	// 无 ledger / 无战役记录 / serial 链 → 倍率 1.0（行为不变）。
 	tc := taskClockFrom(ctx)
-	maxDur, clamped := clampMaxDuration(tc.DeadlineUnix, w.runTimeout)
+	baseBudget := w.runTimeout
+	if mult := w.campaignMultiplier(intent); mult != 1.0 {
+		baseBudget = time.Duration(float64(baseBudget) * mult)
+	}
+	maxDur, clamped := clampMaxDuration(tc.DeadlineUnix, baseBudget)
 	settle := wrapupSettlement("worker", []string{"Bash"})
 	if tc.DeadlineUnix > 0 {
 		settle = wrapupSettlementForTask("worker", []string{"Bash"}, clamped)
@@ -416,7 +505,14 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		opts.SessionID = WorkerSessionID(ts.ID(), intent.ID)
 	}
 	intentID := intent.ID
+	// 延迟观察埋点（发现 12）：每个 usage 活动 = 一个模型回合完成，从回合起点
+	// （上一个 usage/result）到现在的时间就是该回合的墙钟——用它上浮宽限。
+	turnStart := time.Now()
 	emitWrap := func(r db.Activity) {
+		if r.Kind == "usage" {
+			w.observeLatency(time.Since(turnStart))
+			turnStart = time.Now()
+		}
 		if emit != nil {
 			r.NodeID, r.Worker = &intentID, name
 			emit(r)
@@ -484,10 +580,13 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// planner kill cancel ctx; the engine distinguishes those and re-queues/stops.
 	// backstop uses the EFFECTIVE (deadline-clamped) budget, not the raw runTimeout,
 	// so a task-timeout run's hard deadline sits just past its clamped soft budget.
+	// 宽限自适应（发现 12）：用本轮会话观察到的最大单次调用延迟上浮宽限（收尾轮若
+	// 碰上 392s 超长回合，240s 常量会在半路击穿收尾——第三轮实证）；下限 240s 保持
+	// 无观测时的既有校准。
 	runCtx := ctx
 	if maxDur > 0 {
 		var runCancel context.CancelFunc
-		runCtx, runCancel = context.WithTimeoutCause(ctx, maxDur+settleHardGrace, AbortRunHardTimeout)
+		runCtx, runCancel = context.WithTimeoutCause(ctx, maxDur+w.settleHardGrace(), AbortRunHardTimeout)
 		defer runCancel()
 	}
 	_, reason, err := captureRunSession(runCtx, s, input, emitWrap)

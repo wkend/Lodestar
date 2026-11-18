@@ -202,6 +202,8 @@ var builtinAgents = []builtinAgent{
 	// 运行语义仍由 LODESTAR_BRAIN2_*/LODESTAR_VERIFIER_* 与代码兜底决定,不受此表影响。
 	{"hypothesizer", "态势研判", "planner", "第二 brain：心跳唤醒，横向综合已确认事实，提出跨资产/跨链路的态势级假设，供规划者派意图验证。", nil, false, nil},
 	{"verifier", "发现复核", "worker", "独立复核：重放漏洞 PoC 的只读关键证据，确认发现是否真实，结论写回该发现供规划者与运营者参考。", nil, false, nil},
+	// 继承者：意图死亡分支异步触发（非心跳循环）。同上，建行只为提示词可编辑。
+	{"inheritor", "继承者", "worker", "遗产提取：读取零写回横死意图的执行轨迹，把未写回的探索结论蒸馏成事实入图——个体的死不带走它的知识。", nil, false, nil},
 }
 
 // seedBuiltins inserts the fixed built-in agents and their variable catalog (idempotent).

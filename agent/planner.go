@@ -287,6 +287,7 @@ const plannerDefaultTmpl = `你是一个授权渗透测试系统的"规划者"�
    - **用 TodoWrite 把整条链记成待办**（每步一条），然后**本轮只派"前置已满足"的那一步**（通常是第一步）；
    - 待该步产出 fact 后，下一次唤醒（提示里会带上你的待办清单）再派下一步，并把已满足的步骤标 completed；
    - 判断"同一件事"别拆两条（如"确认触发点"和"触发触发点"是同一步）。**平行的探索维度**（如同时枚举多个不相关端点）才用多意图并行。
+   - **链内意图标 serial: true**（add_intent 的 serial 字段）：串行链是关键路径，预算不受方向级竞争饿瘦。
 4. 用【一次】 add_intent 批量提交第 3 步筛出的新方向（intents 数组，最多 4 个最高价值的；不要逐条多次调）：
    - summary：一句话自由描述该方向（测试目标完整地址+做什么+为什么），用自然语言，**不要套用固定分类**。方向要在 summary 里写清楚，去重主要靠它与已有意图比对。
    - asset_ids：本方向要**测试/攻击的目标资产 id**（**尽量传**，0/1/多个；是 list_assets 里的资产 id）。只要方向围绕某些具体资产（某站点/接口/参数/主机）就**务必传上**——它标记「这条探索打哪些目标」，用于覆盖去重、把意图连入资产链路；跨多个资产就都传。仅当纯全局侦察、确实没有具体目标资产时才留空。
@@ -397,17 +398,20 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	// 指令 + 跨唤醒待办（todo 是模型自己的规划便签，可再生，放 user 即可）。
 	// 开场白按「本轮有无具体变动」分两种：有变动 → 指向下方【实际变动】块；无变动
 	// (心跳定时巡检 / hint / 恢复等) → 别谎称"图发生了变化",转而提示顺带复查在跑意图。
+	// 心跳 lead 的 steer 前置纪律（2026-11-17 ATLAS 盲杀复盘：worker 11.5 分钟零写回，
+	// planner 图盲判"无进展"直接 kill——先 steer 要求写回，横死由继承者兜底但自觉写回质量最高）。
 	lead := "刚有具体变动（见下面的【本次触发本轮的实际变动】），据此规划下一步："
 	if len(triggers) == 0 {
-		lead = "本轮是**定时巡检（心跳到点）/无具体变动信号**的唤醒——图不一定有新变动。顺带复查在跑意图：长时间无进展或跑偏的用 steer_work 纠偏、方向整个错的用 kill_work 止损；再判定目标、决定是否补方向："
+		lead = "本轮是**定时巡检（心跳到点）/无具体变动信号**的唤醒——图不一定有新变动。顺带复查在跑意图：**长时间无进展的先用 steer_work 要求它立即 record_fact 写回当前已发现**（图里零事实≠无进展，可能只是没写回——kill 会丢上下文）；方向整个错误（而非进展缓慢）才 kill_work 止损；再判定目标、决定是否补方向："
 	}
 	input := lead + situational + "\n\n据上面的态势，判定目标。**本轮若无未被覆盖的新方向，直接结束即可（生成 0 个意图是正常且常见的，尤其刚派完意图在等 worker 产出时）。目标已【真正达成】（已拿到目标成果/已确认目标漏洞）时用 prove_goal 逐个标记；未达成就什么都不调、直接结束本轮。**" +
 		renderPlannerTodos(opts.Todos.List())
 	// 有 deadline 夹逼时加硬 ctx 兜底(软预算 + grace),防单轮卡死绕过轮边界软超时。
+	// planner 无逐回合延迟观察(worker 才有 usage 埋点),用静态底 240s。
 	runCtx := ctx
 	if maxDur > 0 {
 		var cancel context.CancelFunc
-		runCtx, cancel = context.WithTimeoutCause(ctx, maxDur+settleHardGrace, AbortRunHardTimeout)
+		runCtx, cancel = context.WithTimeoutCause(ctx, maxDur+settleGraceFloorFromLatency(0), AbortRunHardTimeout)
 		defer cancel()
 	}
 	_, _, err = captureRun(runCtx, opts, input,

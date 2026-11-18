@@ -363,6 +363,32 @@ func (s *Server) buildVerifierFromEnv(gProv llm.Provider, gCfg agent.Config, tx 
 	return v
 }
 
+// buildInheritorFromEnv builds the posthumous extraction role（继承者）. 与 verifier/
+// brain2 不同，它默认启用——继承是文明保障层机制（设计文档 §1.6）：零写回横死的知识
+// 回收不应依赖 operator 记得开开关。LODESTAR_INHERITOR_ENABLED 显式 falsy 关闭；
+// LODESTAR_INHERITOR_MODEL 覆盖模型。
+func (s *Server) buildInheritorFromEnv(gProv llm.Provider, gCfg agent.Config, tx *transcript.Store) *agent.Inheritor {
+	if isFalsy(os.Getenv("LODESTAR_INHERITOR_ENABLED")) {
+		return nil
+	}
+	prov, cfg := s.providerForAgent("inheritor", nil, gProv, gCfg)
+	if m := strings.TrimSpace(os.Getenv("LODESTAR_INHERITOR_MODEL")); m != "" {
+		cfg.Model = m
+	}
+	turns := s.agentMaxTurns("inheritor")
+	if turns <= 0 {
+		turns = inheritorMaxTurnsDefault
+	}
+	v := agent.NewInheritor(retryProvider{inner: prov, label: "inheritor"}, cfg.Model, s.m.dir, tx, cfg.CompactionWindow(), turns)
+	v.SetNonStreaming(nonStreamingResolver(cfg))
+	v.SetMaxTokens(maxTokensResolver(cfg))
+	return v
+}
+
+// inheritorMaxTurnsDefault: 轨迹读取 + ≤5 条写回的会话预算（verifier 的
+// verifierMaxTurnsDefault 同量级，略高——get_worker_trace 两段式读取占回合）。
+const inheritorMaxTurnsDefault = 12
+
 // buildHypothesizerFromEnv builds the second brain (Stage 6b) when
 // LODESTAR_BRAIN2_ENABLED is truthy, else nil (→ engine's hypothesizerLoop no-ops).
 // It resolves its LLM like any other agent (own "hypothesizer" binding → global
@@ -569,6 +595,7 @@ func (s *Server) applyLLM(cfg agent.Config) error {
 	tx := transcript.NewStore(filepath.Join(s.m.dir, "transcripts"))
 	s.engine.SetHypothesizer(s.buildHypothesizerFromEnv(prov, cfg, tx)) // 第二 brain(6b);未开启则 nil
 	s.engine.SetVerifier(s.buildVerifierFromEnv(prov, cfg, tx))         // 发现复核(7b);未开启则 nil
+	s.engine.SetInheritor(s.buildInheritorFromEnv(prov, cfg, tx))       // 继承者;默认启用(显式 falsy 关)
 	win := cfg.CompactionWindow()
 	// mainagent resolves its own binding (→ global fallback); chat stays the GLOBAL
 	// fallback since one ChatAgent serves many agent keys — its per-agent binding is
