@@ -1571,8 +1571,16 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker age
 		state = "exhausted"
 		log.Printf("[worker %s] intent %d 撞步数上限(exhausted)，本次写回 %s", name, intent.ID, wrote)
 	case reason == harness.ReasonTimeout:
-		state = "exhausted"
-		log.Printf("[worker %s] intent %d 运行超时(exhausted)，收尾后写回 %s", name, intent.ID, wrote)
+		if e.serialCheckpoint(t, intent, name) {
+			// v2.8 checkpoint：serial 意图的预算到点从死刑降格为存盘点——settlement 已
+			// 写回，回 open 让 worker 池重领，Resume 续跑原会话（"继续执行。"）。
+			// 个体没死，在预算周期边界歇脚续跑，零上下文丢失（转录复活机制，v2.8 核查①）。
+			state = "open"
+			log.Printf("[worker %s] intent %d 预算到点存盘(checkpoint)，回 open 续跑原会话", name, intent.ID)
+		} else {
+			state = "exhausted"
+			log.Printf("[worker %s] intent %d 运行超时(exhausted)，收尾后写回 %s", name, intent.ID, wrote)
+		}
 	}
 	if state == "blocked" && isTaskLLMChainExhausted(err) {
 		_ = t.Store.SetIntentBlockedReason(intent.ID, db.IntentBlockedLLMQuota)
@@ -1585,8 +1593,59 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker age
 	e.touch(t.ID)
 	e.recordCampaignYield(t, intent, wrote)
 	// blocked/exhausted 的零写回死亡同样触发遗产提取（done 是 worker 自己的判断，尊重不提）。
+	// checkpoint（state=open）非死亡：maybeInherit 对 open 自然 no-op，也不用 NotifyDone
+	// （"意图完成"触发会误导 planner），只 Notify 唤醒——worker 池 ~800ms 内重领续跑。
 	e.maybeInherit(ctx, t, intent, state, wrote)
-	t.NotifyDone(intent.ID) // results changed the graph -> wake the planner (with the just-finished intent id)
+	if state == "open" {
+		t.Notify() // checkpoint：非终态，仅唤醒 planner（重领几乎即时，心跳能看到 open）
+	} else {
+		t.NotifyDone(intent.ID) // results changed the graph -> wake the planner (with the just-finished intent id)
+	}
+	return true
+}
+
+// serialCheckpointMax 是单个 serial 意图的 checkpoint 上限（钱包语义，v2.8）：
+// 每次 checkpoint = 一个完整预算周期（base × serialBudgetFactor）的投入。反复存盘
+// 仍不出的=真僵尸（compaction 乒乓），到达上限后落 exhausted 终态、planner 判官接手。
+// 3 次 × 2400s = 7200s（2 小时）单意图投入上限——校准实测 T=1663s，3 个周期
+// 覆盖 4.3× 安全系数。
+const serialCheckpointMax = 3
+
+// serialCheckpoint 尝试把 serial 意图的预算到点转为 checkpoint（回 open 续跑原
+// 会话）。返回 false 时调用方走原 exhausted 终态。判定链：payload.serial → 活动流
+// checkpoint 计数未达上限 → 记一条 checkpoint 活动（计数器持久化在活动流里，
+// 重启安全）。非 serial 意图永不 checkpoint（浅活个体维持时钟，v2.8 分级政策）。
+func (e *Engine) serialCheckpoint(t *Task, intent *db.Node, worker string) bool {
+	if t == nil || intent == nil {
+		return false
+	}
+	var p struct {
+		Serial bool `json:"serial"`
+	}
+	if json.Unmarshal(intent.Payload, &p) != nil || !p.Serial {
+		return false
+	}
+	// 计数：活动流里该意图的 kind=checkpoint 行。limit 取上限×4——每个预算周期
+	// 产生几百条活动，但只需数 checkpoint 行；取大 limit 一次拿全再数，避免新 SQL。
+	nid := intent.ID
+	acts, _, err := t.Store.ActivityList(&nid, 0, 10000)
+	if err != nil {
+		return false // 计数失败走安全方向：不 checkpoint（维持旧终态）
+	}
+	n := 0
+	for _, a := range acts {
+		if a.Kind == "checkpoint" {
+			n++
+		}
+	}
+	if n >= serialCheckpointMax {
+		log.Printf("[worker %s] intent %d checkpoint 达上限 %d（钱包耗尽），落终态", worker, intent.ID, serialCheckpointMax)
+		return false
+	}
+	_, _ = t.Store.AppendActivity(db.Activity{
+		NodeID: &nid, Worker: worker, Kind: "checkpoint",
+		Summary: fmt.Sprintf("预算到点存盘（%d/%d），回 open 续跑原会话", n+1, serialCheckpointMax),
+	})
 	return true
 }
 
