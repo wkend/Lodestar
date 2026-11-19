@@ -28,6 +28,7 @@ type Planner struct {
 	maxTurns          int                                    // max agent turns per run (0 = unlimited)
 	killWork          func(intentID int64) error             // engine callback to terminate a running work (nil = off)
 	steerWork         func(intentID int64, msg string) error // engine callback to steer a running work mid-run (nil = off)
+	pauseWork         func(ctx context.Context, intentID int64) error // engine callback to hibernate a running work (nil = off)
 	proxyAddr         string                                 // recording proxy for WebFetch (empty = direct)
 	proxyCACert       string                                 // recording proxy's CA cert path (HTTPS verify)
 	webSearch         WebSearchOpts                          // web_search tool backend selection (off by default)
@@ -109,6 +110,11 @@ func (p *Planner) SetKillWork(fn func(intentID int64) error) { p.killWork = fn }
 // SetSteerWork wires the engine's per-work steering callback so the planner's
 // steer_work tool can inject a mid-run course-correction into a running worker.
 func (p *Planner) SetSteerWork(fn func(intentID int64, msg string) error) { p.steerWork = fn }
+
+// SetPauseWork wires the engine callback so the planner's pause_work tool can
+// hibernate a running work into the recoverable paused state (v2.8 死亡政策：
+// 冬眠键——worker 收尾落 paused、释放槽位，transcript 保留可 resume_work 唤醒）。
+func (p *Planner) SetPauseWork(fn func(ctx context.Context, intentID int64) error) { p.pauseWork = fn }
 
 // renderPlannerTodos formats the persistent planning todo for injection into the
 // wake-up prompt (empty when there are no todos yet — first wake-up).
@@ -318,6 +324,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	tsx.SetCoverageEnabled(as == nil || as.CoverageEnabled(taskID))
 	tsx.killWork = p.killWork   // enable kill_work tool (nil = unavailable)
 	tsx.steerWork = p.steerWork // enable steer_work tool (nil = unavailable)
+	tsx.pauseWork = p.pauseWork // enable pause_work tool (nil = unavailable)
 	if origin, _ := ts.OriginFactID(); origin > 0 {
 		tsx.SetOwnerNode(origin) // planner-side anchors default to the task root (origin fact)
 	}
@@ -402,7 +409,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	// planner 图盲判"无进展"直接 kill——先 steer 要求写回，横死由继承者兜底但自觉写回质量最高）。
 	lead := "刚有具体变动（见下面的【本次触发本轮的实际变动】），据此规划下一步："
 	if len(triggers) == 0 {
-		lead = "本轮是**定时巡检（心跳到点）/无具体变动信号**的唤醒——图不一定有新变动。顺带复查在跑意图：**长时间无进展的先用 steer_work 要求它立即 record_fact 写回当前已发现**（图里零事实≠无进展，可能只是没写回——kill 会丢上下文）；方向整个错误（而非进展缓慢）才 kill_work 止损；再判定目标、决定是否补方向："
+		lead = "本轮是**定时巡检（心跳到点）/无具体变动信号**的唤醒——图不一定有新变动。顺带复查在跑意图：**长时间无进展的先用 steer_work 要求它立即 record_fact 写回当前已发现**（图里零事实≠无进展，可能只是没写回——kill 会丢上下文）；**worker 槽位争用时低优先方向用 pause_work 冬眠让位**（进度不丢，resume_work 随时接回）；方向整个错误（而非进展缓慢）才 kill_work 止损；再判定目标、决定是否补方向："
 	}
 	input := lead + situational + "\n\n据上面的态势，判定目标。**本轮若无未被覆盖的新方向，直接结束即可（生成 0 个意图是正常且常见的，尤其刚派完意图在等 worker 产出时）。目标已【真正达成】（已拿到目标成果/已确认目标漏洞）时用 prove_goal 逐个标记；未达成就什么都不调、直接结束本轮。**" +
 		renderPlannerTodos(opts.Todos.List())

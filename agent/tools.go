@@ -78,6 +78,10 @@ type ToolSet struct {
 	// intent id (engine callback, wired by the planner): the worker injects it before
 	// its next tool call and re-plans, without being killed. nil = tool unavailable.
 	steerWork func(intentID int64, msg string) error
+	// pauseWork, if set, hibernates a running work by intent id (engine callback,
+	// v2.8 死亡政策：槽位争用时 planner 用它冬眠低优先方向——worker 收尾落 paused、
+	// 释放 worker 槽，transcript 保留可随时 resume_work 唤醒续跑。nil = 不可用。
+	pauseWork func(ctx context.Context, intentID int64) error
 	// enrich, if set, receives async auto-completion triggers (DNS resolve for a
 	// domain, HTTP probe for a site). nil = no engine enrichment.
 	enrich EnrichTrigger
@@ -1943,6 +1947,73 @@ func (t *ToolSet) steerWorkTool() actool.CoreTool {
 		})
 }
 
+// pauseWorkTool lets the planner hibernate a running work without killing it (v2.8 死亡
+// 政策：冬眠键)。The worker settles into the recoverable paused state — its worker slot is
+// freed for other directions while the transcript stays on disk, resumable any time via
+// resume_work. For capacity contention ("另一条路线更值得跑，这条先让位"); NOT for wrong
+// direction (use kill_work) and NOT for "先要求写回" (use steer_work).
+func (t *ToolSet) pauseWorkTool() actool.CoreTool {
+	return writeTool("pause_work", "让一条正在运行的意图(work)冬眠：worker 收尾落 paused、释放 worker 槽给其他方向跑，进度不丢（transcript 保留），随时可用 resume_work 唤醒原会话续跑。用于槽位争用时给低优先方向让位——方向错误用 kill_work，只想让它写回/纠偏用 steer_work。",
+		obj(map[string]any{"intent_id": idp("要冬眠的意图 id（= work 句柄）")}, "intent_id"),
+		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
+			if t.pauseWork == nil {
+				return actool.Errorf("pause_work 当前不可用"), nil
+			}
+			var a struct {
+				IntentID json.RawMessage `json:"intent_id"`
+			}
+			_ = json.Unmarshal(in, &a)
+			id := pid(a.IntentID)
+			if id <= 0 {
+				return actool.Errorf("intent_id 必填"), nil
+			}
+			node, err := t.ts.GetNode(id)
+			if err != nil || node == nil || node.Kind != db.KindIntent {
+				return actool.Errorf("intent_id 必须是本任务的意图"), nil
+			}
+			if node.State != "running" {
+				return actool.Errorf(fmt.Sprintf("意图 %d 当前状态为 %s，只有 running 的 work 可以冬眠", id, node.State)), nil
+			}
+			if err := t.pauseWork(ctx, id); err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			return actool.Text(fmt.Sprintf("意图 %d 已冬眠（paused），槽位已释放；用 resume_work 可唤醒续跑原会话", id)), nil
+		})
+}
+
+// resumeWorkTool wakes a hibernated (paused) intent back to the frontier: the intent
+// returns to open, a worker re-claims it, and the session resumes from its transcript
+//（"继续执行。"）with full context — zero rebuild. The planner's counterpart to pause_work.
+func (t *ToolSet) resumeWorkTool() actool.CoreTool {
+	return writeTool("resume_work", "唤醒一条冬眠中的意图(work)：回到待领取队列，worker 领取后续跑原会话（上下文不丢）。与 pause_work 配对——冬眠时释放的槽现在空闲时用它接回来。",
+		obj(map[string]any{"intent_id": idp("要唤醒的意图 id")}, "intent_id"),
+		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
+			var a struct {
+				IntentID json.RawMessage `json:"intent_id"`
+			}
+			_ = json.Unmarshal(in, &a)
+			id := pid(a.IntentID)
+			if id <= 0 {
+				return actool.Errorf("intent_id 必填"), nil
+			}
+			node, err := t.ts.GetNode(id)
+			if err != nil || node == nil || node.Kind != db.KindIntent {
+				return actool.Errorf("intent_id 必须是本任务的意图"), nil
+			}
+			if node.State != "paused" {
+				return actool.Errorf(fmt.Sprintf("意图 %d 当前状态为 %s，只有 paused 的 work 可以唤醒", id, node.State)), nil
+			}
+			changed, err := t.ts.CompareAndSetIntentState(id, "paused", "open")
+			if err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			if !changed {
+				return actool.Errorf(fmt.Sprintf("意图 %d 不再是 paused 状态", id)), nil
+			}
+			return actool.Text(fmt.Sprintf("意图 %d 已唤醒回队列，worker 将续跑原会话", id)), nil
+		})
+}
+
 // getWorkerOutput returns a work's final (or截至中止时的) conclusion text by intent id.
 func (t *ToolSet) getWorkerOutput() actool.CoreTool {
 	return readTool("get_worker_output", "取本任务或直接关联任务某条意图(work)的最终输出结论。关联任务结果带 source_task_id/inherited=true 且只读。正常结束返回其总结；被终止(stopped)/异常的 work 返回其截至中止时的最后输出(terminated=true)。",
@@ -2241,7 +2312,7 @@ func (t *ToolSet) PlannerTools() []actool.CoreTool {
 	return []actool.CoreTool{
 		t.graphOverview(), t.listFindings(), t.listFacts(), t.nodeDetail(),
 		t.getWorkerOutput(), t.getWorkerTrace(), t.searchAllWorkerTraces(), t.listGoals(), t.addIntent(), t.proveGoal(), t.goalMet(),
-		t.killWorkTool(), t.steerWorkTool(),
+		t.killWorkTool(), t.steerWorkTool(), t.pauseWorkTool(), t.resumeWorkTool(),
 		// report_finding：规划态势研判时若自身已确证漏洞，可直接登记（与 worker 同工具）。
 		t.addFinding(),
 		// resolve_hypothesis：验证意图产出事实后，把对应假设标 confirmed/refuted（Stage 6b）。

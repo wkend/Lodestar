@@ -488,6 +488,13 @@ func (e *Engine) detachWork(intentID int64) (action string, complete func(error)
 // ControlWork requests a user-visible pause or cancellation and waits until the
 // worker has fully stopped writing. Cancellation cleanup is performed by the API
 // handler after this returns; pause state is committed by runWorkerStep itself.
+// PauseWork hibernates a running work: the worker settles into the recoverable
+// paused state (worker slot freed, transcript preserved). The engine callback behind the
+// planner's pause_work tool (v2.8 死亡政策). Waits for full settlement like the UI path.
+func (e *Engine) PauseWork(ctx context.Context, intentID int64) error {
+	return e.ControlWork(ctx, intentID, "pause")
+}
+
 func (e *Engine) ControlWork(ctx context.Context, intentID int64, action string) error {
 	if action != "pause" && action != "cancel" {
 		return fmt.Errorf("unsupported work action %q", action)
