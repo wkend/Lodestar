@@ -104,12 +104,27 @@ func (w *Worker) settleHardGrace() time.Duration {
 	return settleGraceFloorFromLatency(time.Duration(w.maxCallLatency.Load()))
 }
 
-// campaignMultiplier resolves the L1 metabolism budget multiplier for the intent
-// this worker is about to run. 1.0 = base budget unchanged (no ledger, no
-// campaign history, serial chain, or observation period). Errors degrade to 1.0 —
-// metabolism never blocks a run.
+// serialBudgetFactor 是串行链意图的寿命倍率（种姓表型，初值待校准）：
+// 预算是天花板不是配额（提前 done 归还槽位，抬高零成本）；深活个体实测死于
+// 1350s 的"发育刚完、收获刚启"拐点（意图 #5：finding 确认后 UNION 拖库半途），
+// 初值 ×2 把发育/收获比从 45/55 拉回 ~20/80。挂死检测的真正防线是 planner
+// 心跳（600s steer/kill），预算只是 compaction 乒乓的最后兜底——对链个体抬高
+// 安全且仍有限。校准流程：深链验证跑出链步骤的自然完成时长 T 后，按 T×1.2/1200
+// 重算此常量并重编译（性状常量，不做运行时配置）。
+const serialBudgetFactor = 2.0
+
+// campaignMultiplier resolves the budget multiplier for the intent this worker is
+// about to run. 1.0 = base budget unchanged. Errors degrade to 1.0 — budget
+// policy never blocks a run.
+//
+// 两条独立策略在此汇合：
+//   - 寿命种姓表型：serial 意图（planner 判定的关键路径）× serialBudgetFactor。
+//     放 ledger 判空之前——路径属性不依赖台账存在性（若放 BudgetFor 内，无
+//     ledger 的 worker 会静默失去加成，链寿命被耦合到代谢基础设施上）。
+//   - L1 代谢：非 serial 意图按战役近期产出（BudgetFor：饿瘦 0.75/加码 1.5/
+//     观察期 1.0）。serial 不参与代谢（链寿命由种姓倍率决定，不饿不加）。
 func (w *Worker) campaignMultiplier(intent *db.Node) float64 {
-	if w.ledger == nil || intent == nil {
+	if intent == nil {
 		return 1.0
 	}
 	var p struct {
@@ -120,6 +135,12 @@ func (w *Worker) campaignMultiplier(intent *db.Node) float64 {
 	if json.Unmarshal(intent.Payload, &p) != nil {
 		return 1.0
 	}
+	if p.Serial {
+		return serialBudgetFactor
+	}
+	if w.ledger == nil {
+		return 1.0
+	}
 	key := intentFingerprint(p.Summary, p.AssetIDs)
 	if key == "" {
 		return 1.0
@@ -128,7 +149,7 @@ func (w *Worker) campaignMultiplier(intent *db.Node) float64 {
 	if err != nil || len(runs) == 0 {
 		return 1.0
 	}
-	return BudgetFor(runs, p.Serial)
+	return BudgetFor(runs, false)
 }
 
 // WorkerSessionID returns the stable transcript key used by a worker intent.
@@ -441,8 +462,8 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	}
 	system, boundary := deferredSystem(sysBody, def)
 	// 任务级 deadline(经 ctx 注入)夹逼本 run 的墙钟预算 + 决定收尾词(见 taskclock.go)。
-	// L1 代谢：基础预算先按战役近期产出解析（BudgetFor 倍率 × runTimeout），再进夹逼。
-	// 无 ledger / 无战役记录 / serial 链 → 倍率 1.0（行为不变）。
+	// 预算策略：serial 链意图 × serialBudgetFactor（寿命种姓表型）；非 serial 意图按
+	// L1 代谢（BudgetFor 倍率）。无 ledger 的非 serial / 无战役记录 → 倍率 1.0。
 	tc := taskClockFrom(ctx)
 	baseBudget := w.runTimeout
 	if mult := w.campaignMultiplier(intent); mult != 1.0 {

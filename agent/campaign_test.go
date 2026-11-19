@@ -1,8 +1,11 @@
 package agent
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
+
+	"github.com/wkend/lodestar/db"
 )
 
 // memLedger 内存版记账，测 BudgetFor 用。
@@ -49,7 +52,7 @@ func TestBudgetFor(t *testing.T) {
 		{"近 3 次有产出 → 基础", runs(zero, zero, zero, zero, zero, zero, zero, zero, zero, zero, zero, yield), false, 1.0},
 		{"连续 2 次零产出 → 饿瘦 0.75", runs(make([]CampaignYield, 11)...), false, 0.75},
 		{"最近产出 finding → 加码 1.5", runs(append(make([]CampaignYield, 9), CampaignYield{Findings: 1})...), false, 1.5},
-		{"串行链豁免", runs(make([]CampaignYield, 11)...), true, 1.0},
+		{"串行链豁免代谢（不饿不加）", runs(make([]CampaignYield, 11)...), true, 1.0},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -107,5 +110,31 @@ func TestCampaignLedgerRoundTrip(t *testing.T) {
 	r, _ = l.Recent("camp", 16)
 	if got := BudgetFor(r, false); got != 1.0 {
 		t.Fatalf("产出后应恢复基础, got %.2f", got)
+	}
+}
+
+// TestCampaignMultiplierSerialCaste 验证寿命种姓表型的落点语义（审查纠错 3）：
+// serial 加成在 campaignMultiplier 的 ledger 判空之前——无 ledger 的 worker 的
+// serial 意图也必须拿到加成（路径属性不依赖台账存在性）。
+func TestCampaignMultiplierSerialCaste(t *testing.T) {
+	w := NewWorker(nil, "m", "", nil, 0, 0) // 无 provider 无 ledger
+	mkIntent := func(payload string) *db.Node {
+		return &db.Node{ID: 1, Kind: db.KindIntent, Payload: json.RawMessage(payload)}
+	}
+	// serial 意图，无 ledger → 仍 × serialBudgetFactor。
+	if got := w.campaignMultiplier(mkIntent(`{"summary":"链步骤","serial":true}`)); got != serialBudgetFactor {
+		t.Fatalf("无 ledger 的 serial 意图应 ×%.1f, got %.2f（路径属性不得依赖台账）", serialBudgetFactor, got)
+	}
+	// 非 serial 意图，无 ledger → 1.0（代谢降级路径不变）。
+	if got := w.campaignMultiplier(mkIntent(`{"summary":"普通意图"}`)); got != 1.0 {
+		t.Fatalf("无 ledger 的非 serial 意图应 1.0, got %.2f", got)
+	}
+	// payload 解析失败 → 1.0（降级永不阻断）。
+	if got := w.campaignMultiplier(mkIntent(`{不是json`)); got != 1.0 {
+		t.Fatalf("坏 payload 应降级 1.0, got %.2f", got)
+	}
+	// nil 意图 → 1.0。
+	if got := w.campaignMultiplier(nil); got != 1.0 {
+		t.Fatalf("nil 意图应 1.0, got %.2f", got)
 	}
 }
