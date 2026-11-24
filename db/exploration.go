@@ -1466,7 +1466,7 @@ func scanTrace(rows *sql.Rows) ([]Activity, error) {
 	out := []Activity{}
 	for rows.Next() {
 		var a Activity
-		if err := rows.Scan(&a.ID, &a.NodeID, &a.Worker, &a.Kind, &a.Tool, &a.IsError, &a.Summary); err != nil {
+		if err := rows.Scan(&a.ID, &a.NodeID, &a.Worker, &a.Kind, &a.Tool, &a.ToolUseID, &a.IsError, &a.Summary); err != nil {
 			return nil, err
 		}
 		out = append(out, a)
@@ -1474,7 +1474,7 @@ func scanTrace(rows *sql.Rows) ([]Activity, error) {
 	return out, rows.Err()
 }
 
-const traceCols = `id, node_id, COALESCE(worker,''), COALESCE(kind,''), COALESCE(tool,''), is_error, COALESCE(summary,'')`
+const traceCols = `id, node_id, COALESCE(worker,''), COALESCE(kind,''), COALESCE(tool,''), COALESCE(tool_use_id,''), is_error, COALESCE(summary,'')`
 
 // ActivityTrace lists one work's steps (by intent/node id) for the trace tools:
 // summaries only (detail is lazy — fetch via ActivityByIDs). thinking/usage rows
@@ -1500,7 +1500,7 @@ func (s *ExplorationStore) ActivityTraceForTerminalIntent(nodeID int64, limit in
 	if limit <= 0 {
 		limit = 500
 	}
-	rows, err := s.db.Query(`SELECT a.id, a.node_id, COALESCE(a.worker,''), COALESCE(a.kind,''), COALESCE(a.tool,''), a.is_error, COALESCE(a.summary,'')
+	rows, err := s.db.Query(`SELECT a.id, a.node_id, COALESCE(a.worker,''), COALESCE(a.kind,''), COALESCE(a.tool,''), COALESCE(a.tool_use_id,''), a.is_error, COALESCE(a.summary,'')
 	FROM activity a
 	JOIN exploration_nodes n ON n.id=a.node_id AND n.exploration_id=a.exploration_id
 	WHERE a.exploration_id=$1 AND a.node_id=$2 AND n.kind='intent'
@@ -1548,7 +1548,7 @@ func (s *ExplorationStore) ActivityTraceSearchForTerminalIntent(nodeID int64, q 
 		limit = 100
 	}
 	like := "%" + q + "%"
-	rows, err := s.db.Query(`SELECT a.id, a.node_id, COALESCE(a.worker,''), COALESCE(a.kind,''), COALESCE(a.tool,''), a.is_error, COALESCE(a.summary,'')
+	rows, err := s.db.Query(`SELECT a.id, a.node_id, COALESCE(a.worker,''), COALESCE(a.kind,''), COALESCE(a.tool,''), COALESCE(a.tool_use_id,''), a.is_error, COALESCE(a.summary,'')
 	FROM activity a
 	JOIN exploration_nodes n ON n.id=a.node_id AND n.exploration_id=a.exploration_id
 	WHERE a.exploration_id=$1 AND a.node_id=$2 AND n.kind='intent'
@@ -1570,7 +1570,7 @@ func (s *ExplorationStore) ActivityTraceSearchTerminalIntents(q string, limit in
 		limit = 100
 	}
 	like := "%" + q + "%"
-	rows, err := s.db.Query(`SELECT a.id, a.node_id, COALESCE(a.worker,''), COALESCE(a.kind,''), COALESCE(a.tool,''), a.is_error, COALESCE(a.summary,'')
+	rows, err := s.db.Query(`SELECT a.id, a.node_id, COALESCE(a.worker,''), COALESCE(a.kind,''), COALESCE(a.tool,''), COALESCE(a.tool_use_id,''), a.is_error, COALESCE(a.summary,'')
 	FROM activity a
 	JOIN exploration_nodes n ON n.id=a.node_id AND n.exploration_id=a.exploration_id
 	WHERE a.exploration_id=$1 AND n.kind='intent'
@@ -1669,7 +1669,7 @@ func (s *ExplorationStore) ActivityByIDs(ids []int64) ([]Activity, error) {
 		ph[i] = fmt.Sprintf("$%d", i+2)
 		args[i+1] = id
 	}
-	rows, err := s.db.Query(`SELECT id, node_id, COALESCE(kind,''), COALESCE(tool,''), is_error, COALESCE(detail,'')
+	rows, err := s.db.Query(`SELECT id, node_id, COALESCE(kind,''), COALESCE(tool,''), COALESCE(tool_use_id,''), is_error, COALESCE(detail,'')
 FROM activity WHERE exploration_id=$1 AND kind<>'thinking' AND id IN (`+strings.Join(ph, ",")+`) ORDER BY id`, args...)
 	if err != nil {
 		return nil, err
@@ -1678,7 +1678,32 @@ FROM activity WHERE exploration_id=$1 AND kind<>'thinking' AND id IN (`+strings.
 	out := []Activity{}
 	for rows.Next() {
 		var a Activity
-		if err := rows.Scan(&a.ID, &a.NodeID, &a.Kind, &a.Tool, &a.IsError, &a.Detail); err != nil {
+		if err := rows.Scan(&a.ID, &a.NodeID, &a.Kind, &a.Tool, &a.ToolUseID, &a.IsError, &a.Detail); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// ListToolUsePayloads returns this exploration's tool-call payload rows
+// (kind='tool_use', full Detail = the complete call input) in id order — the
+// "outbound corpus" for provenance filtering（v2.9 §5.5 C1：出站语料的独立查询
+// 路径，不经 ILIKE 前置过滤——编码形态的载荷永不命中字面搜索）。
+func (s *ExplorationStore) ListToolUsePayloads(limit int) ([]Activity, error) {
+	if limit <= 0 {
+		limit = 5000
+	}
+	rows, err := s.db.Query(`SELECT id, node_id, COALESCE(worker,''), COALESCE(tool,''), COALESCE(tool_use_id,''), COALESCE(detail,'')
+FROM activity WHERE exploration_id=$1 AND kind='tool_use' AND node_id IS NOT NULL ORDER BY id LIMIT $2`, s.expID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Activity{}
+	for rows.Next() {
+		var a Activity
+		if err := rows.Scan(&a.ID, &a.NodeID, &a.Worker, &a.Tool, &a.ToolUseID, &a.Detail); err != nil {
 			return nil, err
 		}
 		out = append(out, a)
