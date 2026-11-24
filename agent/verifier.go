@@ -61,6 +61,7 @@ const verifierDefaultTmpl = `你是一个授权渗透测试系统的"复核者"�
 **规则**
 - 只复核这一条发现。不扩大攻击面，不尝试新漏洞，不利用它进一步获取权限。
 - 优先重放 PoC 中的【只读】部分（一次 GET/HEAD、一次只读查询、读取已落盘的证据文件）。需要写入、删除、修改口令、或大量请求的操作一律不做，依据记录的证据判断，并在 issues 中注明。
+- 证据链（evidence.chain）存在时按段复核：重放 steps 中的只读步骤、比对 response 原文、检查 conclusion 的对应关系是否成立；chain 缺失时按 evidence.poc 旧格式处理（历史 finding 兼容）。
 - verified=true 的门槛：你亲自拿到了与声称一致的响应或命令输出。仅凭版本号、扫描器告警、或"看起来像"不算。
 - verified=false 时，issues 必须写明具体哪一步对不上（例如"重放返回 403，PoC 中的 token 已失效"），不要空泛。
 - 目标不可达导致无法复现时，verified=false，issues 写"目标不可达，待复测"。无法复现不等于漏洞不存在，别把它说成"已证伪"。

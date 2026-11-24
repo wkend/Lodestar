@@ -1345,17 +1345,43 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 			"summary":   str("发现摘要"),
 			"intent_id": idp("产生本发现的意图 id（任务上下文必填；会话上下文可不填）"),
 			"asset_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "【存在时尽量填写，否则在摘要中必须要写清楚漏洞位置】受影响资产 id（可选，0/1/多个）：参数/端点/站点等。一个漏洞影响多处可全填，纯观察可不填。"},
-			"evidence":  str("证据/PoC 文本"),
+			"evidence":  str("证据/PoC 文本（旧格式；未提供 evidence_chain 时必须给）"),
+			"evidence_chain": map[string]any{
+				"type":        "object",
+				"description": "结构化证据链（v2.9 推荐，验证者按段复核）：原始请求+响应原文 / 可执行重放步骤 / 结论对应关系。四项均为字符串，可选填任意组合。",
+				"properties": map[string]any{
+					"request":    str("① 原始请求（完整命令或 HTTP 报文；若证据经解码/变换获得，此处放变换【前】的原始形态）"),
+					"response":   str("① 原始响应原文（关键输出片段）"),
+					"steps":      str("② 可执行的重放/推导步骤（含解码/变换步骤，只读可复现）"),
+					"conclusion": str("③ 结论对应关系（以上证据如何推出该发现）"),
+				},
+			},
 		}, "vulnclass", "severity", "summary"),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
 				VulnClass, Name, Severity, Summary, Evidence string
-				IntentID                                     json.RawMessage   `json:"intent_id"`
-				AssetIDs                                     []json.RawMessage `json:"asset_ids"`
+				EvidenceChain                                struct {
+					Request, Response, Steps, Conclusion string
+				} `json:"evidence_chain"`
+				IntentID json.RawMessage   `json:"intent_id"`
+				AssetIDs []json.RawMessage `json:"asset_ids"`
 			}
 			_ = json.Unmarshal(in, &a)
+			chainGiven := a.EvidenceChain.Request != "" || a.EvidenceChain.Response != "" ||
+				a.EvidenceChain.Steps != "" || a.EvidenceChain.Conclusion != ""
+			// C3 纪律软拒：先自证，再申报（无任何证据的 finding 退回去补——带理由，agent 可修正重交）。
+			if a.Evidence == "" && !chainGiven {
+				return actool.Errorf("report_finding 需要证据自证：请提供 evidence（PoC 文本）或 evidence_chain（request/response/steps/conclusion 至少一项）后重交"), nil
+			}
+			ev := map[string]any{"by": t.worker, "poc": a.Evidence}
+			if chainGiven {
+				ev["chain"] = map[string]any{
+					"request": a.EvidenceChain.Request, "response": a.EvidenceChain.Response,
+					"steps": a.EvidenceChain.Steps, "conclusion": a.EvidenceChain.Conclusion,
+				}
+			}
 			payload := map[string]any{"vulnclass": a.VulnClass, "name": a.Name, "severity": a.Severity, "summary": a.Summary,
-				"evidence": map[string]any{"by": t.worker, "poc": a.Evidence}}
+				"evidence": ev}
 			var anchors []int64
 			for _, raw := range a.AssetIDs {
 				if p := pid(raw); p > 0 {
@@ -1983,7 +2009,7 @@ func (t *ToolSet) pauseWorkTool() actool.CoreTool {
 
 // resumeWorkTool wakes a hibernated (paused) intent back to the frontier: the intent
 // returns to open, a worker re-claims it, and the session resumes from its transcript
-//（"继续执行。"）with full context — zero rebuild. The planner's counterpart to pause_work.
+// （"继续执行。"）with full context — zero rebuild. The planner's counterpart to pause_work.
 func (t *ToolSet) resumeWorkTool() actool.CoreTool {
 	return writeTool("resume_work", "唤醒一条冬眠中的意图(work)：回到待领取队列，worker 领取后续跑原会话（上下文不丢）。与 pause_work 配对——冬眠时释放的槽现在空闲时用它接回来。",
 		obj(map[string]any{"intent_id": idp("要唤醒的意图 id")}, "intent_id"),
