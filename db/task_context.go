@@ -10,6 +10,11 @@ import (
 
 const IntentBlockedLLMQuota = "llm_quota_exhausted"
 
+// IntentBlockedRateLimited 标记被账号级速率风暴（429/1302 等瞬时限流）耗尽重试的
+// blocked 意图（发现 13）：与额度耗尽（需等配额恢复）不同，限流瞬时，靠
+// ReopenRateLimitedIntents 的时间门控复位，不依赖外部恢复信号。
+const IntentBlockedRateLimited = "rate_limited"
+
 // TaskLLMProfile is one ordered entry in a task's explicit failover chain.
 type TaskLLMProfile struct {
 	ProfileID   int64      `json:"profile_id"`
@@ -564,6 +569,22 @@ func (s *ExplorationStore) SetIntentBlockedReason(id int64, reason string) error
 SET state='blocked', blocked_reason=NULLIF($1,''), completed_at=now()
 WHERE id=$2 AND exploration_id=$3 AND kind='intent'`, reason, id, s.expID)
 	return err
+}
+
+// ReopenRateLimitedIntents flips 'blocked' intents labeled rate_limited back to
+// 'open' once older than minAge. 1302 速率限额是瞬时限流（发现 13）：用时间门控
+// 复位而非外部"恢复"信号。Workers resume from their transcripts; kept graph
+// writes remain.
+func (s *ExplorationStore) ReopenRateLimitedIntents(minAge time.Duration) (int64, error) {
+	res, err := s.db.Exec(`UPDATE exploration_nodes
+SET state='open', blocked_reason=NULL, completed_at=NULL
+WHERE exploration_id=$1 AND kind='intent' AND state='blocked' AND blocked_reason=$2
+  AND updated_at < now() - make_interval(secs => $3)`, s.expID, IntentBlockedRateLimited, minAge.Seconds())
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
 }
 
 func (s *ExplorationStore) ReopenIntentsByBlockedReason(reason string) (int64, error) {

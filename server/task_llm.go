@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"iter"
 	"log"
+	"math/rand/v2"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -84,6 +85,26 @@ func isTaskLLMChainExhausted(err error) bool {
 // identify quota, credits, billing balance, or payment exhaustion.
 func isQuotaExhaustedError(err error) bool {
 	return err != nil && agent.IsQuotaExhaustedMessage(err.Error())
+}
+
+// isRateLimitError reports whether the error is a transient account-level RATE
+// limit (GLM code=1302 "已达到速率限制") — distinct from quota exhaustion
+// (1308/1310 → isTaskLLMChainExhausted): 限流瞬时、退避可恢复。供 blocked 分类
+// 打 rate_limited 标签（发现 13：速率风暴类 blocked 曾无标签、无复活路径）。
+func isRateLimitError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	// 额度耗尽类显式排除：1308/1310 的响应体同样带 "type":"rate_limit_error"，
+	// 但它们的语义是"等配额恢复"，走 llm_quota_exhausted 标签，不是瞬时限流。
+	if strings.Contains(s, `"code":"1308"`) || strings.Contains(s, `"code":"1310"`) {
+		return false
+	}
+	if strings.Contains(s, `"code":"1302"`) || strings.Contains(s, "code=1302") {
+		return true
+	}
+	return strings.Contains(s, "status 429") && strings.Contains(s, "rate_limit")
 }
 
 type taskLLMSelection struct {
@@ -321,7 +342,7 @@ func streamTaskLLM(ctx context.Context, taskID string, req llm.CompletionRequest
 				}
 				if streamErr != nil && !committed && ctx.Err() == nil &&
 					attempt < sameProviderStreamRetries && isRetryableStreamError(streamErr) {
-					backoff := sameProviderRetryBackoff(attempt)
+					backoff := retryBackoffFor(attempt, streamErr)
 					log.Printf("[task-llm] task %s 提交前流失败,%v 后同 provider 重试 (%d/%d): %v",
 						taskID, backoff, attempt+1, sameProviderStreamRetries, streamErr)
 					if sleepCtx(ctx, backoff) {
@@ -400,6 +421,18 @@ const sameProviderStreamRetries = 2
 // 以变量形式暴露,便于测试将退避置零。
 var sameProviderRetryBackoff = func(attempt int) time.Duration {
 	return min(500*time.Millisecond*(1<<attempt), 4*time.Second)
+}
+
+// rateLimitRetryFloor 是限流类流错误的退避下限：多流同时被 429 时限，500ms 起步的
+// 重试会在同一相位反复撞墙（发现 13 的风暴放大），故限流类起步 2s + ≤500ms 抖动。
+const rateLimitRetryFloor = 2 * time.Second
+
+func retryBackoffFor(attempt int, err error) time.Duration {
+	backoff := sameProviderRetryBackoff(attempt)
+	if isRateLimitError(err) && backoff < rateLimitRetryFloor {
+		backoff = rateLimitRetryFloor + rand.N(500*time.Millisecond)
+	}
+	return backoff
 }
 
 // isRetryableStreamError 判断「提交前的流失败」是否值得在同一 provider 上重放。
@@ -562,6 +595,11 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	pl.SetMaxTokens(plannerRuntime.maxTokens)
 	pl.SetKillWork(s.engine.KillWork)
 	pl.SetSteerWork(s.engine.SteerWork)
+	// v2.8 冬眠键：所有任务运行都走这个 task-router planner（authoritative resolver），
+	// 与 server.go buildPlannerWorker 的全局 fallback 构造点必须同步接线
+	//（27ad8a2 曾漏此处 → pause_work 在全部任务路径"当前不可用"，见
+	// docs/判读报告-v2.8回验首跑.md 发现 15）。
+	pl.SetPauseWork(s.engine.PauseWork)
 	pl.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
 	pl.SetWebSearch(s.webSearchFor("planner"))
 	pl.SetConstraintInject(s.constraintInjectPlanner) // 操作约束注入 planner(可配置,默认开)

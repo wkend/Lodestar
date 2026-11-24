@@ -368,7 +368,10 @@ func (s *Server) buildVerifierFromEnv(gProv llm.Provider, gCfg agent.Config, tx 
 // 回收不应依赖 operator 记得开开关。LODESTAR_INHERITOR_ENABLED 显式 falsy 关闭；
 // LODESTAR_INHERITOR_MODEL 覆盖模型。
 func (s *Server) buildInheritorFromEnv(gProv llm.Provider, gCfg agent.Config, tx *transcript.Store) *agent.Inheritor {
-	if isFalsy(os.Getenv("LODESTAR_INHERITOR_ENABLED")) {
+	// 显式关闭才关：未设置=默认启用（isFalsy("") 为 true，不能用作"默认启用"
+	// 语义的判据——2026-11-24 回验发现 16：unset 时继承者被静默禁用，#7 横死
+	// 零写回无遗产提取）。
+	if explicitlyDisabled(os.Getenv("LODESTAR_INHERITOR_ENABLED")) {
 		return nil
 	}
 	prov, cfg := s.providerForAgent("inheritor", nil, gProv, gCfg)
@@ -427,6 +430,17 @@ func splitEnvList(s string) []string {
 func isFalsy(v string) bool {
 	switch strings.ToLower(strings.TrimSpace(v)) {
 	case "", "0", "false", "no", "off":
+		return true
+	}
+	return false
+}
+
+// explicitlyDisabled reports whether an env switch is EXPLICITLY turned off.
+// 与 isFalsy 的区别：empty（未设置）不算关闭——供"默认启用"语义的开关使用，
+// 例如 LODESTAR_INHERITOR_ENABLED（继承者默认启用，仅显式 0/false/no/off 关闭）。
+func explicitlyDisabled(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "0", "false", "no", "off":
 		return true
 	}
 	return false
@@ -536,9 +550,13 @@ func (s *Server) buildPlannerWorker(pinID *int64, gProv llm.Provider, gCfg agent
 	wk.SetMaxTokens(maxTokensResolver(wCfg))         // 单次回复输出上限(0 = 不发)
 	pProv, pCfg := s.providerForAgent("planner", pinID, gProv, gCfg)
 	pl := agent.NewPlanner(pProv, pCfg.Model, s.m.dir, tx, pCfg.CompactionWindow(), s.agentMaxTurns("planner"))
-	pl.SetKillWork(s.engine.KillWork)               // planner kill_work → terminate a running work
-	pl.SetSteerWork(s.engine.SteerWork)             // planner steer_work → inject mid-run course-correction
-	pl.SetPauseWork(s.engine.PauseWork)             // planner pause_work → hibernate a running work (v2.8 冬眠键)
+	pl.SetKillWork(s.engine.KillWork)   // planner kill_work → terminate a running work
+	pl.SetSteerWork(s.engine.SteerWork) // planner steer_work → inject mid-run course-correction
+	// planner pause_work → hibernate a running work (v2.8 冬眠键)。
+	// 注意：本函数是全局 fallback planner；任务运行实际走 task_llm.go agentsForTask
+	// 的 task-router planner——两处构造点必须同步接线（27ad8a2 曾漏后者的
+	// SetPauseWork，见 docs/判读报告-v2.8回验首跑.md 发现 15）。
+	pl.SetPauseWork(s.engine.PauseWork)
 	pl.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert()) // WebFetch through the recording proxy
 	pl.SetWebSearch(s.webSearchFor("planner"))
 	pl.SetConstraintInject(s.constraintInjectPlanner) // 操作约束注入 planner(可配置,默认开;每轮读)

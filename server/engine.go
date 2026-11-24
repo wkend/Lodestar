@@ -1010,6 +1010,11 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 			}
 			return // goalless 分支永不进入 planner.Plan
 		}
+		// 1302 速率风暴的时间门控复位（发现 13）：blocked ≥5 分钟的 rate_limited 意图
+		// 回 open，worker 空闲轮询自动重领并 Resume 续跑原会话。best-effort，失败跳过。
+		if n, rerr := t.Store.ReopenRateLimitedIntents(5 * time.Minute); rerr == nil && n > 0 {
+			log.Printf("[engine] task %s 复位 %d 条限流冬眠意图(rate_limited)", t.ID, n)
+		}
 		if !e.beginTaskOperation(t.ID) {
 			return
 		}
@@ -1591,6 +1596,9 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker age
 	}
 	if state == "blocked" && isTaskLLMChainExhausted(err) {
 		_ = t.Store.SetIntentBlockedReason(intent.ID, db.IntentBlockedLLMQuota)
+	} else if state == "blocked" && isRateLimitError(err) {
+		// 速率风暴类（1302/瞬时限流）：同样落标签，供时间门控复位（发现 13）。
+		_ = t.Store.SetIntentBlockedReason(intent.ID, db.IntentBlockedRateLimited)
 	} else {
 		if stateErr := transitionIntentState(t.Store, intent.ID, "running", state); stateErr != nil {
 			log.Printf("[worker %s] task %s 意图 #%d 终态 %s 落库失败: %v", name, t.ID, intent.ID, state, stateErr)
