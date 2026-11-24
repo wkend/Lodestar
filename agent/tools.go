@@ -2016,7 +2016,7 @@ func (t *ToolSet) resumeWorkTool() actool.CoreTool {
 
 // getWorkerOutput returns a work's final (or截至中止时的) conclusion text by intent id.
 func (t *ToolSet) getWorkerOutput() actool.CoreTool {
-	return readTool("get_worker_output", "取本任务或直接关联任务某条意图(work)的最终输出结论。关联任务结果带 source_task_id/inherited=true 且只读。正常结束返回其总结；被终止(stopped)/异常的 work 返回其截至中止时的最后输出(terminated=true)。",
+	return readTool("get_worker_output", "取本任务或直接关联任务某条意图(work)的最终输出结论。关联任务结果带 source_task_id/inherited=true 且只读。有最终结论(result)返回之（state 字段标明意图当前状态）；终态无结论（stopped/blocked/exhausted）返回截至中止时的最后输出（terminated=true）；未终结意图（open/running/paused）返回最新输出（terminated=false，state 标明运行态——尚在运行的意图没有最终结论不等于被终止）。",
 		obj(map[string]any{"intent_id": idp("意图 id（= work 句柄）")}, "intent_id"),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
@@ -2050,12 +2050,21 @@ func (t *ToolSet) getWorkerOutput() actool.CoreTool {
 			}
 			pick, terminated := chosen, false
 			if pick == nil {
-				pick, terminated = fallback, true
+				pick = fallback
+				// 无 result 行的 terminated 语义按意图状态判定：未终结意图（open/
+				// running/paused）天然还没有"最终结论"，不是"被终止"——把 running
+				// 报成 terminated=true 曾致 planner 处决活着的串行链
+				// （docs/判读报告-v2.8回验首跑.md 发现 18）。
+				switch intentNode.State {
+				case "stopped", "blocked", "exhausted":
+					terminated = true // 终态且无最终结论 = 真正的"死于无输出"
+				}
 			}
 			if pick == nil {
 				if intentNode.Inherited {
 					return jsonResult(inheritedMap(map[string]any{
-						"intent_id": id, "final_text": "（该 work 尚无任何输出）", "terminated": true,
+						"intent_id": id, "final_text": "（该 work 尚无任何输出）", "terminated": terminated,
+						"state": intentNode.State,
 					}, intentNode.SourceTaskID))
 				}
 				return actool.Text("（该 work 尚无任何输出）"), nil
@@ -2067,6 +2076,7 @@ func (t *ToolSet) getWorkerOutput() actool.CoreTool {
 			result := map[string]any{
 				"intent_id": id, "worker_name": pick.Worker, "final_text": detail,
 				"summary": pick.Summary, "is_error": pick.IsError, "terminated": terminated,
+				"state": intentNode.State,
 			}
 			if intentNode.Inherited {
 				inheritedMap(result, intentNode.SourceTaskID)
